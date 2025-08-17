@@ -1,6 +1,13 @@
 import React, { useState } from "react";
+import { jsPDF } from "jspdf";
+import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com"; // <-- change if your API URL differs
+const BRAND_NAME = "MaxTT";
+const WATERMARK_TEXT = "MaxTT Billing - Treadstone Solutions"; // change if you want
+const COMPANY_NAME = "Treadstone Solutions";
+const COMPANY_SUB = "MaxTT Billing Prototype";
+const CURRENCY_FMT = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
 
 // ---- MaxTT dosage logic (simplified per your rules) ----
 // Width_in = Tyre Width (mm) × 0.03937
@@ -29,6 +36,99 @@ function computeDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   return roundTo25(dosage);
 }
 
+// ---------- PDF GENERATION ----------
+function generateInvoicePDF(inv) {
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 40;
+
+  // Watermark (light gray, diagonal)
+  doc.saveGraphicsState && doc.saveGraphicsState();
+  doc.setFontSize(60);
+  doc.setTextColor(225);
+  doc.text(WATERMARK_TEXT, pageWidth / 2, 400, { angle: 35, align: "center" });
+  doc.setTextColor(0);
+  doc.restoreGraphicsState && doc.restoreGraphicsState();
+
+  // Header
+  doc.setFontSize(20);
+  doc.text(COMPANY_NAME, margin, 50);
+  doc.setFontSize(11);
+  doc.text(COMPANY_SUB, margin, 68);
+
+  // Invoice title + meta
+  doc.setFontSize(16);
+  doc.text(`${BRAND_NAME} Invoice`, margin, 100);
+
+  const created = inv.created_at ? new Date(inv.created_at) : new Date();
+  const dateStr = created.toLocaleString();
+  doc.setFontSize(11);
+  doc.text(`Invoice ID: ${inv.id}`, pageWidth - margin, 50, { align: "right" });
+  doc.text(`Date: ${dateStr}`, pageWidth - margin, 68, { align: "right" });
+
+  // Customer block
+  const yCustStart = 130;
+  doc.setFontSize(12);
+  doc.text("Customer Details", margin, yCustStart);
+  doc.setFontSize(11);
+  const custLines = [
+    `Name: ${inv.customer_name || ""}`,
+    `Mobile: ${inv.mobile_number || ""}`,
+    `Vehicle: ${inv.vehicle_number || ""}`,
+    `Installer: ${inv.installer_name || ""}`
+  ];
+  custLines.forEach((t, i) => doc.text(t, margin, yCustStart + 18 + i * 16));
+
+  // Tyre/Vehicle block
+  const yTyreStart = yCustStart;
+  const xRightBlock = pageWidth / 2 + 20;
+  doc.setFontSize(12);
+  doc.text("Tyre / Vehicle", xRightBlock, yTyreStart);
+  doc.setFontSize(11);
+  const tyreLines = [
+    `Vehicle Type: ${inv.vehicle_type || ""}`,
+    `Tyre: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
+    `Tread Depth: ${inv.tread_depth_mm ?? ""} mm`,
+    `Dosage: ${inv.dosage_ml ?? ""} ml`
+  ];
+  tyreLines.forEach((t, i) => doc.text(t, xRightBlock, yTyreStart + 18 + i * 16));
+
+  // Amounts table
+  const price = Number(inv.price_per_ml ?? 0);
+  const before = Number(inv.total_before_gst ?? 0);
+  const gst = Number(inv.gst_amount ?? 0);
+  const total = Number(inv.total_with_gst ?? 0);
+
+  const body = [
+    ["Dosage (ml)", `${inv.dosage_ml ?? ""}`],
+    ["MRP per ml", CURRENCY_FMT.format(price)],
+    ["Amount (before GST)", CURRENCY_FMT.format(before)],
+    ["GST", CURRENCY_FMT.format(gst)],
+    ["Total (with GST)", CURRENCY_FMT.format(total)]
+  ];
+
+  doc.autoTable({
+    startY: yCustStart + 120,
+    head: [["Description", "Value"]],
+    body,
+    styles: { fontSize: 11, cellPadding: 6 },
+    headStyles: { fillColor: [0, 0, 0] }
+  });
+
+  // Footer note
+  const yAfter = doc.lastAutoTable ? doc.lastAutoTable.finalY + 24 : 500;
+  doc.setFontSize(10);
+  doc.text(
+    "This invoice is system-generated. Pricing and GST are computed per configured rates. © " + new Date().getFullYear() + " " + COMPANY_NAME,
+    margin,
+    yAfter
+  );
+
+  // Save
+  const safeName = `${BRAND_NAME}_Invoice_${inv.id || "draft"}.pdf`;
+  doc.save(safeName);
+}
+
 // ---------- Recent Invoices table (auto-refresh after save) ----------
 function RecentInvoices() {
   const [rows, setRows] = React.useState([]);
@@ -51,7 +151,6 @@ function RecentInvoices() {
 
   React.useEffect(() => {
     fetchRows();
-    // listen for a custom event fired after we save an invoice
     const onUpdated = () => fetchRows();
     window.addEventListener("invoices-updated", onUpdated);
     return () => window.removeEventListener("invoices-updated", onUpdated);
@@ -70,7 +169,7 @@ function RecentInvoices() {
         <div>No invoices yet.</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
-          <table border="1" cellPadding="6" style={{ minWidth: 720 }}>
+          <table border="1" cellPadding="6" style={{ minWidth: 900 }}>
             <thead>
               <tr>
                 <th>ID</th>
@@ -79,6 +178,7 @@ function RecentInvoices() {
                 <th>Vehicle</th>
                 <th>Dosage (ml)</th>
                 <th>Total (₹ with GST)</th>
+                <th>PDF</th>
               </tr>
             </thead>
             <tbody>
@@ -90,6 +190,9 @@ function RecentInvoices() {
                   <td>{r.vehicle_number}</td>
                   <td>{r.dosage_ml}</td>
                   <td>{inr(r.total_with_gst)}</td>
+                  <td>
+                    <button onClick={() => generateInvoicePDF(r)}>Download PDF</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -129,7 +232,7 @@ export default function App() {
         return null;
       }
       alert(
-        `Invoice saved.\nID: ${data.id}\nTotal (before GST): ₹${(data.total_before_gst || 0).toFixed(2)}\nGST: ₹${(data.gst_amount || 0).toFixed(2)}\nTotal (with GST): ₹${(data.total_with_gst || 0).toFixed(2)}`
+        `Invoice saved.\nID: ${data.id}\nTotal (before GST): ${CURRENCY_FMT.format(data.total_before_gst || 0)}\nGST: ${CURRENCY_FMT.format(data.gst_amount || 0)}\nTotal (with GST): ${CURRENCY_FMT.format(data.total_with_gst || 0)}`
       );
 
       // tell the table to refresh
@@ -157,11 +260,6 @@ export default function App() {
       return;
     }
 
-    // Compute totals on client just for display; server is source of truth
-    const totalBeforeGst = dosageMl * MRP_PER_ML;
-    const gstAmount = totalBeforeGst * GST_RATE;
-    const totalWithGst = totalBeforeGst + gstAmount;
-
     await saveInvoiceToServer({
       customer_name: customerName,
       mobile_number: mobileNumber || null,
@@ -174,14 +272,9 @@ export default function App() {
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
       dosage_ml: Number(dosageMl),
-      // gps wiring later
       gps_lat: null,
       gps_lng: null,
       customer_code: null
-    });
-
-    console.log("Computed totals (client-side):", {
-      dosageMl, totalBeforeGst, gstAmount, totalWithGst
     });
   };
 
@@ -228,7 +321,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Recent invoices table */}
+      {/* Recent invoices table with PDF buttons */}
       <RecentInvoices />
     </div>
   );
