@@ -3,9 +3,8 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com"; // change if needed
-const API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // same as Render API_KEY
+const API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // same as backend
 
-// --------- ASCII-safe INR formatter ----------
 function inr(num) {
   const n = Math.round((Number(num) || 0) * 100) / 100;
   const [intPartRaw, dec = "00"] = n.toFixed(2).split(".");
@@ -26,7 +25,6 @@ const VEHICLE_CFG = {
 };
 
 function roundTo25(x) { return Math.round(x / 25) * 25; }
-
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"];
   const widthIn = Number(widthMm || 0) * 0.03937;
@@ -36,28 +34,30 @@ function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   return roundTo25(dosage);
 }
 
-// ============== PDF =================
+// ---------- PDF (includes Franchisee ID & GSTIN from profile) ----------
 function generateInvoicePDF(inv, profile) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 40;
   doc.setFont("helvetica", "normal");
 
-  // Header left: Franchisee profile
+  // Franchisee header
   doc.setFontSize(16);
   doc.text(profile?.name || "Franchisee", margin, 40);
   doc.setFontSize(11);
   const addrLines = String(profile?.address || "").split(/\n|, /g).filter(Boolean);
   addrLines.slice(0, 3).forEach((t, i) => doc.text(t, margin, 58 + i * 14));
-  doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, 58 + addrLines.length * 14 + 4);
+  let y = 58 + addrLines.length * 14 + 4;
+  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, margin, y); y += 14;
+  doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, y);
 
-  // Header right: Invoice meta
+  // Invoice meta
   const created = inv.created_at ? new Date(inv.created_at) : new Date();
   const dateStr = created.toLocaleString();
   doc.text(`Invoice ID: ${inv.id}`, pageWidth - margin, 40, { align: "right" });
   doc.text(`Date: ${dateStr}`, pageWidth - margin, 58, { align: "right" });
 
-  // Title watermark
+  // Watermark
   doc.saveGraphicsState && doc.saveGraphicsState();
   doc.setFontSize(56);
   doc.setTextColor(210);
@@ -66,7 +66,7 @@ function generateInvoicePDF(inv, profile) {
   doc.restoreGraphicsState && doc.restoreGraphicsState();
 
   // Customer block
-  const yCustStart = 110;
+  const yCustStart = 120;
   doc.setFontSize(12);
   doc.text("Customer Details", margin, yCustStart);
   doc.setFontSize(11);
@@ -115,18 +115,14 @@ function generateInvoicePDF(inv, profile) {
     headStyles: { fillColor: [60, 60, 60] }
   });
 
-  // Footer
   const yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 24 : 500;
   doc.setFontSize(10);
-  doc.text(
-    "This invoice is system-generated. Pricing and GST are computed per configured rates.",
-    margin, yAfter
-  );
+  doc.text("This invoice is system-generated. Pricing and GST are computed per configured rates.", margin, yAfter);
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
 
-// ============== Recent Invoices =================
+// ---------- Recent Invoices ----------
 function RecentInvoices({ profile }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -136,14 +132,8 @@ function RecentInvoices({ profile }) {
     setLoading(true);
     fetch(`${API_URL}/api/invoices`)
       .then(r => r.json())
-      .then(data => {
-        setRows(Array.isArray(data) ? data : []);
-        setLoading(false);
-      })
-      .catch(() => {
-        setError("Could not load invoices");
-        setLoading(false);
-      });
+      .then(d => { setRows(Array.isArray(d) ? d : []); setLoading(false); })
+      .catch(() => { setError("Could not load invoices"); setLoading(false); });
   }, []);
 
   useEffect(() => {
@@ -163,7 +153,7 @@ function RecentInvoices({ profile }) {
         <div>No invoices yet.</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
-          <table border="1" cellPadding="6" style={{ minWidth: 1250 }}>
+          <table border="1" cellPadding="6" style={{ minWidth: 1260 }}>
             <thead>
               <tr>
                 <th>ID</th>
@@ -206,17 +196,17 @@ function RecentInvoices({ profile }) {
   );
 }
 
-// =================== MAIN APP (with login) ====================
+// =================== MAIN (with login) ====================
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("maxtt_token") || "");
   const [profile, setProfile] = useState(null);
 
-  // Login form
-  const [fid, setFid] = useState("");        // Franchisee ID
-  const [fpw, setFpw] = useState("");        // Password
+  // login
+  const [fid, setFid] = useState("");
+  const [fpw, setFpw] = useState("");
   const [loginErr, setLoginErr] = useState("");
 
-  // Form fields (same as before)
+  // form fields
   const [customerName, setCustomerName] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
@@ -241,25 +231,10 @@ export default function App() {
   const [fitRL, setFitRL] = useState(false);
   const [fitRR, setFitRR] = useState(false);
 
-  // Fetch franchisee profile once (no auth required)
+  // load franchisee profile (includes franchisee_id + gstin)
   useEffect(() => {
     fetch(`${API_URL}/api/profile`).then(r => r.json()).then(setProfile).catch(() => {});
   }, []);
-
-  function onVehicleTypeChange(v) {
-    setVehicleType(v);
-    const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"];
-    setTyreCount(cfg.defaultTyres);
-  }
-
-  function selectedFitmentsToText() {
-    const parts = [];
-    if (fitFL) parts.push("Front Left");
-    if (fitFR) parts.push("Front Right");
-    if (fitRL) parts.push("Rear Left");
-    if (fitRR) parts.push("Rear Right");
-    return parts.join(", ");
-  }
 
   async function doLogin() {
     setLoginErr("");
@@ -276,9 +251,24 @@ export default function App() {
       }
       localStorage.setItem("maxtt_token", data.token);
       setToken(data.token);
-    } catch (e) {
+    } catch {
       setLoginErr("Network error");
     }
+  }
+
+  function onVehicleTypeChange(v) {
+    setVehicleType(v);
+    const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"];
+    setTyreCount(cfg.defaultTyres);
+  }
+
+  function selectedFitmentsToText() {
+    const parts = [];
+    if (fitFL) parts.push("Front Left");
+    if (fitFR) parts.push("Front Right");
+    if (fitRL) parts.push("Rear Left");
+    if (fitRR) parts.push("Rear Right");
+    return parts.join(", ");
   }
 
   async function saveInvoiceToServer(payload) {
@@ -302,35 +292,22 @@ export default function App() {
       );
       window.dispatchEvent(new Event("invoices-updated"));
       return data;
-    } catch (e) {
+    } catch {
       alert("Network error while saving invoice");
       return null;
     }
   }
 
   const handleCalculate = async () => {
-    if (Number(treadDepth || 0) < 1.5) {
-      alert("Installation blocked: Tread depth below 1.5mm.");
-      return;
-    }
+    if (Number(treadDepth || 0) < 1.5) { alert("Installation blocked: Tread depth below 1.5mm."); return; }
     const tCount = parseInt(tyreCount || "0", 10);
-    if (!tCount || tCount < 1) {
-      alert("Please select number of tyres.");
-      return;
-    }
+    if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
     const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const totalMl = perTyre * tCount;
-
     setDosagePerTyre(perTyre);
     setDosageTotal(totalMl);
-
-    if (!customerName || !vehicleNumber) {
-      alert("Please fill Customer Name and Vehicle Number to save invoice.");
-      return;
-    }
-
+    if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number to save invoice."); return; }
     const fitmentText = selectedFitmentsToText();
-
     await saveInvoiceToServer({
       customer_name: customerName,
       mobile_number: mobileNumber || null,
@@ -343,9 +320,7 @@ export default function App() {
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
       dosage_ml: Number(totalMl),
-      gps_lat: null,
-      gps_lng: null,
-      customer_code: null,
+      gps_lat: null, gps_lng: null, customer_code: null,
       tyre_count: tCount,
       fitment_locations: fitmentText || null,
       customer_gstin: gstin || null,
@@ -353,9 +328,6 @@ export default function App() {
     });
   };
 
-  const tyreOptions = (VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"]).options || [4];
-
-  // -------------- If not logged in, show login screen --------------
   if (!token) {
     return (
       <div style={{ maxWidth: 420, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
@@ -368,9 +340,9 @@ export default function App() {
         </div>
         {profile && (
           <div style={{ marginTop: 16, fontSize: 12, color: "#555" }}>
-            <div><strong>Franchisee (for invoice header):</strong></div>
-            <div>{profile.name}</div>
+            <div><strong>Franchisee:</strong> {profile.name}</div>
             <div>{profile.address}</div>
+            <div>Franchisee ID: {profile.franchisee_id}</div>
             <div>GSTIN: {profile.gstin}</div>
           </div>
         )}
@@ -378,24 +350,23 @@ export default function App() {
     );
   }
 
-  // -------------- Main app (logged in) --------------
   return (
     <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h1>MaxTT Billing & Dosage Calculator</h1>
-        <div>
-          <button onClick={() => { localStorage.removeItem("maxtt_token"); setToken(""); }}>Logout</button>
-        </div>
+        <button onClick={() => { localStorage.removeItem("maxtt_token"); setToken(""); }}>Logout</button>
       </div>
 
       {profile && (
         <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13 }}>
-          <strong>Franchisee:</strong> {profile.name} &nbsp;|&nbsp; <strong>GSTIN:</strong> {profile.gstin}
+          <strong>Franchisee:</strong> {profile.name} &nbsp;|&nbsp;
+          <strong>ID:</strong> {profile.franchisee_id} &nbsp;|&nbsp;
+          <strong>GSTIN:</strong> {profile.gstin}
           <div style={{ color: "#666" }}>{profile.address}</div>
         </div>
       )}
 
-      {/* Top grid */}
+      {/* Customer / job fields */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
         <input placeholder="Customer Name" value={customerName} onChange={e => setCustomerName(e.target.value)} />
         <input placeholder="Vehicle Number" value={vehicleNumber} onChange={e => setVehicleNumber(e.target.value)} />
@@ -412,23 +383,13 @@ export default function App() {
       </div>
 
       {/* Vehicle & tyres */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-        <div>
-          <label style={{ marginRight: 8 }}>Vehicle Category</label>
-          <select value={vehicleType} onChange={e => { setVehicleType(e.target.value); setTyreCount((VEHICLE_CFG[e.target.value] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"]).defaultTyres); }}>
-            {Object.keys(VEHICLE_CFG).map(v => <option key={v}>{v}</option>)}
-          </select>
-        </div>
-        <div>
-          <label style={{ marginRight: 8 }}>Number of Tyres</label>
-          <select value={tyreCount} onChange={e => setTyreCount(e.target.value)}>
-            {(VEHICLE_CFG[vehicleType]?.options || [4]).map(n => <option key={n} value={n}>{n}</option>)}
-          </select>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            (Auto-selected by category; HTV lets you choose 8/10/12/14/16)
-          </div>
-        </div>
-      </div>
+      <VehicleAndTyres
+        vehicleType={vehicleType}
+        setVehicleType={setVehicleType}
+        tyreCount={tyreCount}
+        setTyreCount={setTyreCount}
+        onVehicleTypeChange={onVehicleTypeChange}
+      />
 
       {/* Tyre size */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
@@ -438,24 +399,12 @@ export default function App() {
       </div>
 
       {/* Fitment checkboxes */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ marginBottom: 6 }}><strong>Fitment Location:</strong></div>
-        <label style={{ marginRight: 12 }}>
-          <input type="checkbox" checked={fitFL} onChange={e => setFitFL(e.target.checked)} /> Front Left
-        </label>
-        <label style={{ marginRight: 12 }}>
-          <input type="checkbox" checked={fitFR} onChange={e => setFitFR(e.target.checked)} /> Front Right
-        </label>
-        <label style={{ marginRight: 12 }}>
-          <input type="checkbox" checked={fitRL} onChange={e => setFitRL(e.target.checked)} /> Rear Left
-        </label>
-        <label style={{ marginRight: 12 }}>
-          <input type="checkbox" checked={fitRR} onChange={e => setFitRR(e.target.checked)} /> Rear Right
-        </label>
-        <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-          (Tick where sealant was installed; this prints on the invoice)
-        </div>
-      </div>
+      <Fitment
+        fitFL={fitFL} setFitFL={setFitFL}
+        fitFR={fitFR} setFitFR={setFitFR}
+        fitRL={fitRL} setFitRL={setFitRL}
+        fitRR={fitRR} setFitRR={setFitRR}
+      />
 
       <button onClick={handleCalculate}>Calculate Dosage & Save</button>
 
@@ -470,6 +419,52 @@ export default function App() {
       )}
 
       <RecentInvoices profile={profile} />
+    </div>
+  );
+}
+
+function VehicleAndTyres({ vehicleType, setVehicleType, tyreCount, setTyreCount, onVehicleTypeChange }) {
+  const tyreOptions = (VEHICLE_CFG[vehicleType]?.options || [4]);
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+      <div>
+        <label style={{ marginRight: 8 }}>Vehicle Category</label>
+        <select value={vehicleType} onChange={e => { setVehicleType(e.target.value); onVehicleTypeChange(e.target.value); }}>
+          {Object.keys(VEHICLE_CFG).map(v => <option key={v}>{v}</option>)}
+        </select>
+      </div>
+      <div>
+        <label style={{ marginRight: 8 }}>Number of Tyres</label>
+        <select value={tyreCount} onChange={e => setTyreCount(e.target.value)}>
+          {tyreOptions.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <div style={{ fontSize: 12, color: "#666" }}>
+          (Auto-selected by category; HTV lets you choose 8/10/12/14/16)
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Fitment({ fitFL, setFitFL, fitFR, setFitFR, fitRL, setFitRL, fitRR, setFitRR }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 6 }}><strong>Fitment Location:</strong></div>
+      <label style={{ marginRight: 12 }}>
+        <input type="checkbox" checked={fitFL} onChange={e => setFitFL(e.target.checked)} /> Front Left
+      </label>
+      <label style={{ marginRight: 12 }}>
+        <input type="checkbox" checked={fitFR} onChange={e => setFitFR(e.target.checked)} /> Front Right
+      </label>
+      <label style={{ marginRight: 12 }}>
+        <input type="checkbox" checked={fitRL} onChange={e => setFitRL(e.target.checked)} /> Rear Left
+      </label>
+      <label style={{ marginRight: 12 }}>
+        <input type="checkbox" checked={fitRR} onChange={e => setFitRR(e.target.checked)} /> Rear Right
+      </label>
+      <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+        (Tick where sealant was installed; this prints on the invoice)
+      </div>
     </div>
   );
 }
