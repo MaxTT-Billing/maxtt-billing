@@ -9,15 +9,18 @@ const COMPANY_NAME = "Treadstone Solutions";
 const COMPANY_SUB = "MaxTT Billing Prototype";
 const CURRENCY_FMT = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
 
-// Vehicle config: K, buffer, default tyre count, and allowed options for dropdown
+/**
+ * Vehicle categories (exact labels per your spec) with:
+ * - k, bufferPct: dosage coefficients
+ * - defaultTyres: auto-selected count
+ * - options: allowed tyre counts in the dropdown
+ */
 const VEHICLE_CFG = {
-  "Passenger Car": { k: 2.48, bufferPct: 0.08, defaultTyres: 4, options: [4] },
-  "SUV / Large":   { k: 2.65, bufferPct: 0.08, defaultTyres: 4, options: [4] },
-  "Motorcycle":    { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2, 3] }, // 2/3 as requested
-  "Scooter":       { k: 2.20, bufferPct: 0.00, defaultTyres: 2, options: [2] },    // 2/2
-  "Light Truck / LCV": { k: 2.20, bufferPct: 0.00, defaultTyres: 4, options: [4] },
-  "Truck / Bus (On-road)": { k: 3.00, bufferPct: 0.00, defaultTyres: 6, options: [6] },
-  "Mining / Off-Road": { k: 7.00, bufferPct: 0.08, defaultTyres: 4, options: [4] }
+  "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
+  "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.00, defaultTyres: 3, options: [3] },
+  "4-Wheeler (Passenger car/van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
+  "6-Wheeler (Bus/LTV)":            { k: 3.00, bufferPct: 0.00, defaultTyres: 6, options: [6] },
+  "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.00, bufferPct: 0.00, defaultTyres: 8, options: [8,10,12,14,16] }
 };
 
 function roundTo25(x) {
@@ -25,7 +28,7 @@ function roundTo25(x) {
 }
 
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
-  const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["Passenger Car"];
+  const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"];
   const widthIn = Number(widthMm || 0) * 0.03937;
   const totalHeightIn = (widthIn * (Number(aspectPct || 0) / 100) * 2) + Number(rimIn || 0);
   let dosage = (widthIn * totalHeightIn * entry.k);
@@ -83,7 +86,7 @@ function generateInvoicePDF(inv) {
   doc.setFontSize(11);
   const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25 : null;
   const tyreLines = [
-    `Vehicle Type: ${inv.vehicle_type || ""}`,
+    `Vehicle Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
     `Tread Depth: ${inv.tread_depth_mm ?? ""} mm`,
@@ -164,13 +167,14 @@ function RecentInvoices() {
         <div>No invoices yet.</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
-          <table border="1" cellPadding="6" style={{ minWidth: 1050 }}>
+          <table border="1" cellPadding="6" style={{ minWidth: 1150 }}>
             <thead>
               <tr>
                 <th>ID</th>
                 <th>Date/Time</th>
                 <th>Customer</th>
                 <th>Vehicle</th>
+                <th>Category</th>
                 <th>Tyres</th>
                 <th>Per-tyre (ml)</th>
                 <th>Total Dosage (ml)</th>
@@ -187,6 +191,7 @@ function RecentInvoices() {
                     <td>{new Date(r.created_at).toLocaleString()}</td>
                     <td>{r.customer_name}</td>
                     <td>{r.vehicle_number}</td>
+                    <td>{r.vehicle_type}</td>
                     <td>{r.tyre_count ?? ""}</td>
                     <td>{perTyre ?? ""}</td>
                     <td>{r.dosage_ml}</td>
@@ -210,11 +215,11 @@ export default function App() {
   const [odometer, setOdometer] = useState("");
   const [treadDepth, setTreadDepth] = useState("");
   const [installerName, setInstallerName] = useState("");
-  const [vehicleType, setVehicleType] = useState("Passenger Car");
+  const [vehicleType, setVehicleType] = useState("4-Wheeler (Passenger car/van/SUV)");
   const [tyreWidth, setTyreWidth] = useState("");
   const [aspectRatio, setAspectRatio] = useState("");
   const [rimDiameter, setRimDiameter] = useState("");
-  const [tyreCount, setTyreCount] = useState(VEHICLE_CFG["Passenger Car"].defaultTyres);
+  const [tyreCount, setTyreCount] = useState(VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"].defaultTyres);
   const [dosagePerTyre, setDosagePerTyre] = useState(null);
   const [dosageTotal, setDosageTotal] = useState(null);
 
@@ -223,7 +228,7 @@ export default function App() {
 
   function onVehicleTypeChange(v) {
     setVehicleType(v);
-    const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["Passenger Car"];
+    const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"];
     setTyreCount(cfg.defaultTyres);
   }
 
@@ -281,22 +286,22 @@ export default function App() {
       odometer: Number(odometer || 0),
       tread_depth_mm: Number(treadDepth || 0),
       installer_name: installerName || null,
-      vehicle_type: vehicleType,
+      vehicle_type: vehicleType,           // category label is saved
       tyre_width_mm: Number(tyreWidth || 0),
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
-      dosage_ml: Number(totalMl), // total dosage
+      dosage_ml: Number(totalMl),          // total dosage saved
       gps_lat: null,
       gps_lng: null,
       customer_code: null,
-      tyre_count: tCount            // NEW: save tyre count
+      tyre_count: tCount                   // saved to DB
     });
   };
 
-  const tyreOptions = (VEHICLE_CFG[vehicleType] || VEHICLE_CFG["Passenger Car"]).options || [4];
+  const tyreOptions = (VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"]).options || [4];
 
   return (
-    <div style={{ maxWidth: 1000, margin: "20px auto", padding: 10 }}>
+    <div style={{ maxWidth: 1100, margin: "20px auto", padding: 10 }}>
       <h1>MaxTT Billing & Dosage Calculator</h1>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
@@ -310,7 +315,7 @@ export default function App() {
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
         <div>
-          <label style={{ marginRight: 8 }}>Vehicle Type</label>
+          <label style={{ marginRight: 8 }}>Vehicle Category</label>
           <select value={vehicleType} onChange={e => onVehicleTypeChange(e.target.value)}>
             {Object.keys(VEHICLE_CFG).map(v => <option key={v}>{v}</option>)}
           </select>
@@ -320,7 +325,9 @@ export default function App() {
           <select value={tyreCount} onChange={e => setTyreCount(e.target.value)}>
             {tyreOptions.map(n => <option key={n} value={n}>{n}</option>)}
           </select>
-          <div style={{ fontSize: 12, color: "#666" }}>(Auto-selected for vehicle; you can change if needed)</div>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            (Auto-selected by category; HTV lets you choose 8/10/12/14/16)
+          </div>
         </div>
       </div>
 
@@ -341,7 +348,7 @@ export default function App() {
             <div><strong>Total Dosage:</strong> {dosageTotal} ml for {tyreCount} tyres</div>
           )}
           <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-            (Per-tyre rounded to nearest 25 ml; includes buffer by vehicle type)
+            (Per-tyre rounded to nearest 25 ml; includes buffer by category)
           </div>
         </div>
       )}
