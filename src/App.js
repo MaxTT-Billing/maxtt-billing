@@ -50,6 +50,23 @@ export default function BillingApp() {
     const finalDosage = Math.round(baseDosage * bufferFactor / 25) * 25;
     setDosage(finalDosage);
   };
+// Example — replace the variables with your actual field/state names:
+saveInvoiceToServer({
+  customer_name: customerName,         // from your input/state
+  mobile_number: mobileNumber,         // optional
+  vehicle_number: vehicleNumber,       // required
+  odometer: Number(odometerReading || 0),
+  tread_depth_mm: Number(treadDepth || 0),
+  installer_name: installerName,
+  vehicle_type: vehicleType,           // value from the dropdown
+  tyre_width_mm: Number(tyreWidth || 0),
+  aspect_ratio: Number(aspectRatio || 0),
+  rim_diameter_in: Number(rimDiameter || 0),
+  dosage_ml: Number(dosageMl),         // <-- your computed dosage
+  gps_lat: null,                       // fill later when you wire GPS
+  gps_lng: null,
+  customer_code: customerCode || null  // if you have it yet
+});
 
   const calculateAmount = () => {
     const subtotal = dosage * pricePerML;
@@ -144,5 +161,27 @@ export default function BillingApp() {
         </>
       )}
     </div>
+const API_URL = "https://maxtt-billing-api.onrender.com";
+
+async function saveInvoiceToServer(payload) {
+  try {
+    const res = await fetch(`${API_URL}/api/invoices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert("Save failed: " + (data?.error || "unknown_error"));
+      return null;
+    }
+    alert(`Invoice saved. ID: ${data.id}\nTotal (with GST): ₹${(data.total_with_gst || 0).toFixed(2)}`);
+    return data;
+  } catch (e) {
+    alert("Network error while saving invoice");
+    return null;
+  }
+}
+
   );
 }
