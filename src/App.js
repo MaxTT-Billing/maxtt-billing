@@ -1,187 +1,159 @@
-import React, { useState } from 'react';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import React, { useState } from "react";
 
-export default function BillingApp() {
-  const [vehicleType, setVehicleType] = useState('Passenger Car');
-  const [tyreSize, setTyreSize] = useState({ width: '', aspect: '', rim: '' });
-  const [dosage, setDosage] = useState(null);
+const API_URL = "https://maxtt-billing-api.onrender.com"; // <-- change if your API URL differs
 
-  const [customerInfo, setCustomerInfo] = useState({
-    name: '',
-    vehicleNo: '',
-    mobile: '',
-    odometer: '',
-    treadDepth: '',
-    installer: '',
-  });
+// ---- MaxTT dosage logic (simplified per your rules) ----
+// Width_in = Tyre Width (mm) × 0.03937
+// Total_Height_in = (Width_in × Aspect_Ratio/100 × 2) + Rim_Diameter (in)
+// K by vehicle type, with buffers and rounding to nearest 25 ml
 
-  const [pricePerML, setPricePerML] = useState(2.5);
-  const [discount, setDiscount] = useState(0);
+const VEHICLE_K = {
+  "Passenger Car": { k: 2.48, bufferPct: 0.08 },   // 8% buffer
+  "SUV / Large": { k: 2.65, bufferPct: 0.08 },      // 8%
+  "Motorcycle": { k: 2.60, bufferPct: 0.03 },       // 3%
+  "Scooter": { k: 2.20, bufferPct: 0.00 },          // 0%
+  "Light Truck / LCV": { k: 2.20, bufferPct: 0.00 },// 0%
+  "Truck / Bus (On-road)": { k: 3.00, bufferPct: 0.00 }, // 0%
+  "Mining / Off-Road": { k: 7.00, bufferPct: 0.08 } // 8%
+};
 
-  const K_VALUES = {
-    "Scooter": 2.20,
-    "Motorcycle": 2.60,
-    "Passenger Car": 2.48,
-    "SUV": 2.65,
-    "Light Truck/LCV": 2.20,
-    "Heavy Truck/Bus": 3.00,
-    "Mining/Off-Road": 7.00,
-  };
-
-  const BUFFER = {
-    "Scooter": 0,
-    "Motorcycle": 1,
-    "Passenger Car": 1,
-    "SUV": 1,
-    "Light Truck/LCV": 2,
-    "Heavy Truck/Bus": 2,
-    "Mining/Off-Road": 3,
-  };
-
-  const calculateDosage = () => {
-    const widthIn = parseFloat(tyreSize.width) * 0.03937;
-    const aspectRatio = parseFloat(tyreSize.aspect);
-    const rim = parseFloat(tyreSize.rim);
-    const totalHeightIn = (widthIn * (aspectRatio / 100) * 2) + rim;
-    const k = K_VALUES[vehicleType];
-    const baseDosage = widthIn * totalHeightIn * k;
-    const bufferFactor = 1 + (BUFFER[vehicleType] / 100);
-    const finalDosage = Math.round(baseDosage * bufferFactor / 25) * 25;
-    setDosage(finalDosage);
-  };
-// Example — replace the variables with your actual field/state names:
-saveInvoiceToServer({
-  customer_name: customerName,         // from your input/state
-  mobile_number: mobileNumber,         // optional
-  vehicle_number: vehicleNumber,       // required
-  odometer: Number(odometerReading || 0),
-  tread_depth_mm: Number(treadDepth || 0),
-  installer_name: installerName,
-  vehicle_type: vehicleType,           // value from the dropdown
-  tyre_width_mm: Number(tyreWidth || 0),
-  aspect_ratio: Number(aspectRatio || 0),
-  rim_diameter_in: Number(rimDiameter || 0),
-  dosage_ml: Number(dosageMl),         // <-- your computed dosage
-  gps_lat: null,                       // fill later when you wire GPS
-  gps_lng: null,
-  customer_code: customerCode || null  // if you have it yet
-});
-
-  const calculateAmount = () => {
-    const subtotal = dosage * pricePerML;
-    const discounted = subtotal - discount;
-    const gst = discounted * 0.18;
-    return {
-      subtotal,
-      discounted,
-      gst,
-      total: discounted + gst,
-    };
-  };
-
-  const generatePDF = () => {
-    const doc = new jsPDF();
-    doc.setFontSize(12);
-    doc.text("MaxTT Tyre Sealant Invoice", 14, 20);
-
-    doc.text(`Customer Name: ${customerInfo.name}`, 14, 30);
-    doc.text(`Vehicle No: ${customerInfo.vehicleNo}`, 14, 36);
-    doc.text(`Mobile: ${customerInfo.mobile}`, 14, 42);
-    doc.text(`Odometer: ${customerInfo.odometer} km`, 14, 48);
-    doc.text(`Tread Depth: ${customerInfo.treadDepth} mm`, 14, 54);
-    doc.text(`Installer: ${customerInfo.installer}`, 14, 60);
-
-    autoTable(doc, {
-      head: [["Vehicle Type", "Tyre Size (W/A/R)", "Dosage (ml)", "Rate/ml", "Subtotal"]],
-      body: [[
-        vehicleType,
-        `${tyreSize.width}/${tyreSize.aspect}R${tyreSize.rim}`,
-        `${dosage} ml`,
-        `₹${pricePerML}`,
-        `₹${(dosage * pricePerML).toFixed(2)}`
-      ]],
-      startY: 70
-    });
-
-    const amt = calculateAmount();
-    doc.text(`Discount: ₹${discount.toFixed(2)}`, 14, 100);
-    doc.text(`GST (18%): ₹${amt.gst.toFixed(2)}`, 14, 106);
-    doc.text(`Total: ₹${amt.total.toFixed(2)}`, 14, 112);
-
-    doc.setFontSize(10);
-    doc.text("\nDisclaimer & Indemnity:", 14, 130);
-    const disclaimer = `The MaxTT Tyre Sealant is a preventive maintenance product designed to minimize the risk of punctures and tyre deflation during normal vehicle operation. While it significantly reduces such risks, it does not eliminate them entirely. The effectiveness of the sealant is optimized for tyres operated within legally permitted speed limits. Use beyond such limits, improper application or misuse may void performance expectations. Treadstone Solutions assumes no liability for misuse or damage. All disputes subject to Gurgaon jurisdiction.`;
-    const splitText = doc.splitTextToSize(disclaimer, 180);
-    doc.text(splitText, 14, 135);
-
-    doc.save("MaxTT_Invoice.pdf");
-  };
-
-  const amount = dosage ? calculateAmount() : null;
-
-  return (
-    <div style={{ maxWidth: '800px', margin: 'auto', padding: '20px' }}>
-      <h2>MaxTT Billing & Dosage Calculator</h2>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-        <input placeholder="Customer Name" value={customerInfo.name} onChange={(e) => setCustomerInfo({ ...customerInfo, name: e.target.value })} />
-        <input placeholder="Vehicle Number" value={customerInfo.vehicleNo} onChange={(e) => setCustomerInfo({ ...customerInfo, vehicleNo: e.target.value })} />
-        <input placeholder="Mobile Number" value={customerInfo.mobile} onChange={(e) => setCustomerInfo({ ...customerInfo, mobile: e.target.value })} />
-        <input placeholder="Odometer Reading" value={customerInfo.odometer} onChange={(e) => setCustomerInfo({ ...customerInfo, odometer: e.target.value })} />
-        <input placeholder="Tread Depth (mm)" value={customerInfo.treadDepth} onChange={(e) => setCustomerInfo({ ...customerInfo, treadDepth: e.target.value })} />
-        <input placeholder="Installer Name" value={customerInfo.installer} onChange={(e) => setCustomerInfo({ ...customerInfo, installer: e.target.value })} />
-      </div>
-
-      <br />
-      <label>Vehicle Type</label>
-      <select value={vehicleType} onChange={(e) => setVehicleType(e.target.value)}>
-        {Object.keys(K_VALUES).map(type => <option key={type}>{type}</option>)}
-      </select>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginTop: '10px' }}>
-        <input type="number" placeholder="Tyre Width (mm)" value={tyreSize.width} onChange={(e) => setTyreSize({ ...tyreSize, width: e.target.value })} />
-        <input type="number" placeholder="Aspect Ratio (%)" value={tyreSize.aspect} onChange={(e) => setTyreSize({ ...tyreSize, aspect: e.target.value })} />
-        <input type="number" placeholder="Rim Diameter (in)" value={tyreSize.rim} onChange={(e) => setTyreSize({ ...tyreSize, rim: e.target.value })} />
-      </div>
-
-      <br />
-      <button onClick={calculateDosage}>Calculate Dosage</button>
-
-      {dosage && (
-        <>
-          <p>Recommended Dosage: {dosage} ml</p>
-          <p>Price per ml: ₹{pricePerML}</p>
-          <input type="number" placeholder="Discount ₹ (before GST)" value={discount} onChange={(e) => setDiscount(parseFloat(e.target.value) || 0)} />
-          <p>Subtotal: ₹{amount.subtotal.toFixed(2)}</p>
-          <p>After Discount: ₹{amount.discounted.toFixed(2)}</p>
-          <p>GST (18%): ₹{amount.gst.toFixed(2)}</p>
-          <h3>Total: ₹{amount.total.toFixed(2)}</h3>
-          <button onClick={generatePDF}>Download PDF Invoice</button>
-        </>
-      )}
-    </div>
-const API_URL = "https://maxtt-billing-api.onrender.com";
-
-async function saveInvoiceToServer(payload) {
-  try {
-    const res = await fetch(`${API_URL}/api/invoices`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      alert("Save failed: " + (data?.error || "unknown_error"));
-      return null;
-    }
-    alert(`Invoice saved. ID: ${data.id}\nTotal (with GST): ₹${(data.total_with_gst || 0).toFixed(2)}`);
-    return data;
-  } catch (e) {
-    alert("Network error while saving invoice");
-    return null;
-  }
+function roundTo25(x) {
+  return Math.round(x / 25) * 25;
 }
 
+function computeDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
+  const entry = VEHICLE_K[vehicleType] || VEHICLE_K["Passenger Car"];
+  const widthIn = Number(widthMm || 0) * 0.03937;
+  const totalHeightIn = (widthIn * (Number(aspectPct || 0) / 100) * 2) + Number(rimIn || 0);
+  let dosage = (widthIn * totalHeightIn * entry.k);
+  dosage = dosage * (1 + entry.bufferPct);
+  return roundTo25(dosage);
+}
+
+export default function App() {
+  const [customerName, setCustomerName] = useState("");
+  const [vehicleNumber, setVehicleNumber] = useState("");
+  const [mobileNumber, setMobileNumber] = useState("");
+  const [odometer, setOdometer] = useState("");
+  const [treadDepth, setTreadDepth] = useState("");
+  const [installerName, setInstallerName] = useState("");
+  const [vehicleType, setVehicleType] = useState("Passenger Car");
+  const [tyreWidth, setTyreWidth] = useState("");
+  const [aspectRatio, setAspectRatio] = useState("");
+  const [rimDiameter, setRimDiameter] = useState("");
+  const [dosage, setDosage] = useState(null);
+
+  const MRP_PER_ML = 4.5;
+  const GST_RATE = 0.18;
+
+  async function saveInvoiceToServer(payload) {
+    try {
+      const res = await fetch(`${API_URL}/api/invoices`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert("Save failed: " + (data?.error || "unknown_error"));
+        return null;
+      }
+      alert(
+        `Invoice saved.\nID: ${data.id}\nTotal (before GST): ₹${(data.total_before_gst || 0).toFixed(2)}\nGST: ₹${(data.gst_amount || 0).toFixed(2)}\nTotal (with GST): ₹${(data.total_with_gst || 0).toFixed(2)}`
+      );
+      return data;
+    } catch (e) {
+      alert("Network error while saving invoice");
+      return null;
+    }
+  }
+
+  const handleCalculate = async () => {
+    // Safety locks as per your rules
+    if (Number(treadDepth || 0) < 1.5) {
+      alert("Installation blocked: Tread depth below 1.5mm.");
+      return;
+    }
+
+    const dosageMl = computeDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
+    setDosage(dosageMl);
+
+    if (!customerName || !vehicleNumber) {
+      alert("Please fill Customer Name and Vehicle Number to save invoice.");
+      return;
+    }
+
+    // Compute totals client-side just for display; server is source of truth
+    const totalBeforeGst = dosageMl * MRP_PER_ML;
+    const gstAmount = totalBeforeGst * GST_RATE;
+    const totalWithGst = totalBeforeGst + gstAmount;
+
+    // POST to API (only 3 fields required: customer_name, vehicle_number, dosage_ml)
+    await saveInvoiceToServer({
+      customer_name: customerName,
+      mobile_number: mobileNumber || null,
+      vehicle_number: vehicleNumber,
+      odometer: Number(odometer || 0),
+      tread_depth_mm: Number(treadDepth || 0),
+      installer_name: installerName || null,
+      vehicle_type: vehicleType,
+      tyre_width_mm: Number(tyreWidth || 0),
+      aspect_ratio: Number(aspectRatio || 0),
+      rim_diameter_in: Number(rimDiameter || 0),
+      dosage_ml: Number(dosageMl),
+      // gps_lat/gps_lng can be added later when you wire GPS
+      gps_lat: null,
+      gps_lng: null,
+      customer_code: null
+    });
+
+    console.log("Computed totals (client-side):", {
+      dosageMl, totalBeforeGst, gstAmount, totalWithGst
+    });
+  };
+
+  return (
+    <div style={{ maxWidth: 900, margin: "20px auto", padding: 10 }}>
+      <h1>MaxTT Billing & Dosage Calculator</h1>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+        <input placeholder="Customer Name" value={customerName} onChange={e => setCustomerName(e.target.value)} />
+        <input placeholder="Vehicle Number" value={vehicleNumber} onChange={e => setVehicleNumber(e.target.value)} />
+        <input placeholder="Mobile Number" value={mobileNumber} onChange={e => setMobileNumber(e.target.value)} />
+        <input placeholder="Odometer Reading" value={odometer} onChange={e => setOdometer(e.target.value)} />
+        <input placeholder="Tread Depth (mm)" value={treadDepth} onChange={e => setTreadDepth(e.target.value)} />
+        <input placeholder="Installer Name" value={installerName} onChange={e => setInstallerName(e.target.value)} />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <label style={{ marginRight: 8 }}>Vehicle Type</label>
+        <select value={vehicleType} onChange={e => setVehicleType(e.target.value)}>
+          <option>Passenger Car</option>
+          <option>SUV / Large</option>
+          <option>Motorcycle</option>
+          <option>Scooter</option>
+          <option>Light Truck / LCV</option>
+          <option>Truck / Bus (On-road)</option>
+          <option>Mining / Off-Road</option>
+        </select>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
+        <input placeholder="Tyre Width (mm)" value={tyreWidth} onChange={e => setTyreWidth(e.target.value)} />
+        <input placeholder="Aspect Ratio (%)" value={aspectRatio} onChange={e => setAspectRatio(e.target.value)} />
+        <input placeholder="Rim Diameter (in)" value={rimDiameter} onChange={e => setRimDiameter(e.target.value)} />
+      </div>
+
+      <button onClick={handleCalculate}>Calculate Dosage</button>
+
+      {dosage !== null && (
+        <div style={{ marginTop: 12 }}>
+          <strong>Recommended Dosage: {dosage} ml</strong>
+          <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+            (Rounded to nearest 25 ml; includes buffer based on vehicle type)
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
