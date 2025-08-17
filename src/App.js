@@ -4,7 +4,7 @@ import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com"; // <-- change if your API URL differs
 const BRAND_NAME = "MaxTT";
-const WATERMARK_TEXT = "MaxTT Billing - Treadstone Solutions"; // change if you want
+const WATERMARK_TEXT = "MaxTT Billing - Treadstone Solutions";
 const COMPANY_NAME = "Treadstone Solutions";
 const COMPANY_SUB = "MaxTT Billing Prototype";
 const CURRENCY_FMT = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
@@ -14,20 +14,20 @@ const CURRENCY_FMT = new Intl.NumberFormat("en-IN", { style: "currency", currenc
 // Total_Height_in = (Width_in × Aspect_Ratio/100 × 2) + Rim_Diameter (in)
 // K by vehicle type, with buffers and rounding to nearest 25 ml
 const VEHICLE_K = {
-  "Passenger Car": { k: 2.48, bufferPct: 0.08 },      // 8% buffer
-  "SUV / Large": { k: 2.65, bufferPct: 0.08 },         // 8%
-  "Motorcycle": { k: 2.60, bufferPct: 0.03 },          // 3%
-  "Scooter": { k: 2.20, bufferPct: 0.00 },             // 0%
-  "Light Truck / LCV": { k: 2.20, bufferPct: 0.00 },   // 0%
-  "Truck / Bus (On-road)": { k: 3.00, bufferPct: 0.00 }, // 0%
-  "Mining / Off-Road": { k: 7.00, bufferPct: 0.08 }    // 8%
+  "Passenger Car": { k: 2.48, bufferPct: 0.08, defaultTyres: 4 },
+  "SUV / Large": { k: 2.65, bufferPct: 0.08, defaultTyres: 4 },
+  "Motorcycle": { k: 2.60, bufferPct: 0.03, defaultTyres: 2 },
+  "Scooter": { k: 2.20, bufferPct: 0.00, defaultTyres: 2 },
+  "Light Truck / LCV": { k: 2.20, bufferPct: 0.00, defaultTyres: 4 },
+  "Truck / Bus (On-road)": { k: 3.00, bufferPct: 0.00, defaultTyres: 6 },
+  "Mining / Off-Road": { k: 7.00, bufferPct: 0.08, defaultTyres: 4 }
 };
 
 function roundTo25(x) {
   return Math.round(x / 25) * 25;
 }
 
-function computeDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
+function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   const entry = VEHICLE_K[vehicleType] || VEHICLE_K["Passenger Car"];
   const widthIn = Number(widthMm || 0) * 0.03937;
   const totalHeightIn = (widthIn * (Number(aspectPct || 0) / 100) * 2) + Number(rimIn || 0);
@@ -42,7 +42,7 @@ function generateInvoicePDF(inv) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 40;
 
-  // Watermark (light gray, diagonal)
+  // Watermark
   doc.saveGraphicsState && doc.saveGraphicsState();
   doc.setFontSize(60);
   doc.setTextColor(225);
@@ -89,7 +89,7 @@ function generateInvoicePDF(inv) {
     `Vehicle Type: ${inv.vehicle_type || ""}`,
     `Tyre: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
     `Tread Depth: ${inv.tread_depth_mm ?? ""} mm`,
-    `Dosage: ${inv.dosage_ml ?? ""} ml`
+    `Total Dosage: ${inv.dosage_ml ?? ""} ml` // total saved in DB
   ];
   tyreLines.forEach((t, i) => doc.text(t, xRightBlock, yTyreStart + 18 + i * 16));
 
@@ -100,7 +100,7 @@ function generateInvoicePDF(inv) {
   const total = Number(inv.total_with_gst ?? 0);
 
   const body = [
-    ["Dosage (ml)", `${inv.dosage_ml ?? ""}`],
+    ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
     ["MRP per ml", CURRENCY_FMT.format(price)],
     ["Amount (before GST)", CURRENCY_FMT.format(before)],
     ["GST", CURRENCY_FMT.format(gst)],
@@ -115,7 +115,7 @@ function generateInvoicePDF(inv) {
     headStyles: { fillColor: [0, 0, 0] }
   });
 
-  // Footer note
+  // Footer
   const yAfter = doc.lastAutoTable ? doc.lastAutoTable.finalY + 24 : 500;
   doc.setFontSize(10);
   doc.text(
@@ -124,7 +124,6 @@ function generateInvoicePDF(inv) {
     yAfter
   );
 
-  // Save
   const safeName = `${BRAND_NAME}_Invoice_${inv.id || "draft"}.pdf`;
   doc.save(safeName);
 }
@@ -169,14 +168,14 @@ function RecentInvoices() {
         <div>No invoices yet.</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
-          <table border="1" cellPadding="6" style={{ minWidth: 900 }}>
+          <table border="1" cellPadding="6" style={{ minWidth: 960 }}>
             <thead>
               <tr>
                 <th>ID</th>
                 <th>Date/Time</th>
                 <th>Customer</th>
                 <th>Vehicle</th>
-                <th>Dosage (ml)</th>
+                <th>Total Dosage (ml)</th>
                 <th>Total (₹ with GST)</th>
                 <th>PDF</th>
               </tr>
@@ -214,10 +213,19 @@ export default function App() {
   const [tyreWidth, setTyreWidth] = useState("");
   const [aspectRatio, setAspectRatio] = useState("");
   const [rimDiameter, setRimDiameter] = useState("");
-  const [dosage, setDosage] = useState(null);
+  const [tyreCount, setTyreCount] = useState(VEHICLE_K["Passenger Car"].defaultTyres);
+  const [dosagePerTyre, setDosagePerTyre] = useState(null);
+  const [dosageTotal, setDosageTotal] = useState(null);
 
   const MRP_PER_ML = 4.5;
   const GST_RATE = 0.18;
+
+  // When vehicle type changes, prefill tyre count with a sensible default (editable)
+  function onVehicleTypeChange(v) {
+    setVehicleType(v);
+    const def = (VEHICLE_K[v] || VEHICLE_K["Passenger Car"]).defaultTyres || 4;
+    setTyreCount(def);
+  }
 
   async function saveInvoiceToServer(payload) {
     try {
@@ -234,10 +242,7 @@ export default function App() {
       alert(
         `Invoice saved.\nID: ${data.id}\nTotal (before GST): ${CURRENCY_FMT.format(data.total_before_gst || 0)}\nGST: ${CURRENCY_FMT.format(data.gst_amount || 0)}\nTotal (with GST): ${CURRENCY_FMT.format(data.total_with_gst || 0)}`
       );
-
-      // tell the table to refresh
-      window.dispatchEvent(new Event("invoices-updated"));
-
+      window.dispatchEvent(new Event("invoices-updated")); // refresh table
       return data;
     } catch (e) {
       alert("Network error while saving invoice");
@@ -252,8 +257,20 @@ export default function App() {
       return;
     }
 
-    const dosageMl = computeDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
-    setDosage(dosageMl);
+    // Basic validation on tyre count
+    const tCount = Math.max(1, Math.min(20, parseInt(tyreCount || "0", 10) || 0));
+    if (!tCount) {
+      alert("Please enter number of tyres (e.g., 4 for cars).");
+      return;
+    }
+    setTyreCount(tCount);
+
+    // Compute per-tyre and total
+    const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
+    const totalMl = perTyre * tCount;
+
+    setDosagePerTyre(perTyre);
+    setDosageTotal(totalMl);
 
     if (!customerName || !vehicleNumber) {
       alert("Please fill Customer Name and Vehicle Number to save invoice.");
@@ -271,7 +288,7 @@ export default function App() {
       tyre_width_mm: Number(tyreWidth || 0),
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
-      dosage_ml: Number(dosageMl),
+      dosage_ml: Number(totalMl), // <-- save TOTAL dosage to DB
       gps_lat: null,
       gps_lng: null,
       customer_code: null
@@ -293,7 +310,7 @@ export default function App() {
 
       <div style={{ marginBottom: 8 }}>
         <label style={{ marginRight: 8 }}>Vehicle Type</label>
-        <select value={vehicleType} onChange={e => setVehicleType(e.target.value)}>
+        <select value={vehicleType} onChange={e => onVehicleTypeChange(e.target.value)}>
           <option>Passenger Car</option>
           <option>SUV / Large</option>
           <option>Motorcycle</option>
@@ -310,13 +327,30 @@ export default function App() {
         <input placeholder="Rim Diameter (in)" value={rimDiameter} onChange={e => setRimDiameter(e.target.value)} />
       </div>
 
+      <div style={{ marginBottom: 12 }}>
+        <input
+          placeholder="Number of tyres to treat (e.g., 4)"
+          value={tyreCount}
+          onChange={e => setTyreCount(e.target.value)}
+          style={{ width: 260, marginRight: 8 }}
+        />
+        <span style={{ fontSize: 12, color: "#666" }}>
+          (Defaults based on vehicle type; you can change it)
+        </span>
+      </div>
+
       <button onClick={handleCalculate}>Calculate Dosage</button>
 
-      {dosage !== null && (
+      {(dosagePerTyre !== null || dosageTotal !== null) && (
         <div style={{ marginTop: 12 }}>
-          <strong>Recommended Dosage: {dosage} ml</strong>
+          {dosagePerTyre !== null && (
+            <div><strong>Per-tyre Dosage:</strong> {dosagePerTyre} ml</div>
+          )}
+          {dosageTotal !== null && (
+            <div><strong>Total Dosage:</strong> {dosageTotal} ml for {tyreCount} tyres</div>
+          )}
           <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-            (Rounded to nearest 25 ml; includes buffer based on vehicle type)
+            (Per-tyre rounded to nearest 25 ml; includes buffer by vehicle type)
           </div>
         </div>
       )}
