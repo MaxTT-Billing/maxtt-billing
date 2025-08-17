@@ -6,15 +6,14 @@ const API_URL = "https://maxtt-billing-api.onrender.com"; // <-- change if your 
 // Width_in = Tyre Width (mm) × 0.03937
 // Total_Height_in = (Width_in × Aspect_Ratio/100 × 2) + Rim_Diameter (in)
 // K by vehicle type, with buffers and rounding to nearest 25 ml
-
 const VEHICLE_K = {
-  "Passenger Car": { k: 2.48, bufferPct: 0.08 },   // 8% buffer
-  "SUV / Large": { k: 2.65, bufferPct: 0.08 },      // 8%
-  "Motorcycle": { k: 2.60, bufferPct: 0.03 },       // 3%
-  "Scooter": { k: 2.20, bufferPct: 0.00 },          // 0%
-  "Light Truck / LCV": { k: 2.20, bufferPct: 0.00 },// 0%
+  "Passenger Car": { k: 2.48, bufferPct: 0.08 },      // 8% buffer
+  "SUV / Large": { k: 2.65, bufferPct: 0.08 },         // 8%
+  "Motorcycle": { k: 2.60, bufferPct: 0.03 },          // 3%
+  "Scooter": { k: 2.20, bufferPct: 0.00 },             // 0%
+  "Light Truck / LCV": { k: 2.20, bufferPct: 0.00 },   // 0%
   "Truck / Bus (On-road)": { k: 3.00, bufferPct: 0.00 }, // 0%
-  "Mining / Off-Road": { k: 7.00, bufferPct: 0.08 } // 8%
+  "Mining / Off-Road": { k: 7.00, bufferPct: 0.08 }    // 8%
 };
 
 function roundTo25(x) {
@@ -28,6 +27,77 @@ function computeDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   let dosage = (widthIn * totalHeightIn * entry.k);
   dosage = dosage * (1 + entry.bufferPct);
   return roundTo25(dosage);
+}
+
+// ---------- Recent Invoices table (auto-refresh after save) ----------
+function RecentInvoices() {
+  const [rows, setRows] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
+
+  const fetchRows = React.useCallback(() => {
+    setLoading(true);
+    fetch(`${API_URL}/api/invoices`)
+      .then(r => r.json())
+      .then(data => {
+        setRows(Array.isArray(data) ? data : []);
+        setLoading(false);
+      })
+      .catch(() => {
+        setError("Could not load invoices");
+        setLoading(false);
+      });
+  }, []);
+
+  React.useEffect(() => {
+    fetchRows();
+    // listen for a custom event fired after we save an invoice
+    const onUpdated = () => fetchRows();
+    window.addEventListener("invoices-updated", onUpdated);
+    return () => window.removeEventListener("invoices-updated", onUpdated);
+  }, [fetchRows]);
+
+  const inr = (n) =>
+    n == null ? "" : new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(n);
+
+  if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
+  if (error) return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
+
+  return (
+    <div style={{ marginTop: 24 }}>
+      <h2>Recent Invoices</h2>
+      {rows.length === 0 ? (
+        <div>No invoices yet.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table border="1" cellPadding="6" style={{ minWidth: 720 }}>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Date/Time</th>
+                <th>Customer</th>
+                <th>Vehicle</th>
+                <th>Dosage (ml)</th>
+                <th>Total (₹ with GST)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id}>
+                  <td>{r.id}</td>
+                  <td>{new Date(r.created_at).toLocaleString()}</td>
+                  <td>{r.customer_name}</td>
+                  <td>{r.vehicle_number}</td>
+                  <td>{r.dosage_ml}</td>
+                  <td>{inr(r.total_with_gst)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -61,6 +131,10 @@ export default function App() {
       alert(
         `Invoice saved.\nID: ${data.id}\nTotal (before GST): ₹${(data.total_before_gst || 0).toFixed(2)}\nGST: ₹${(data.gst_amount || 0).toFixed(2)}\nTotal (with GST): ₹${(data.total_with_gst || 0).toFixed(2)}`
       );
+
+      // tell the table to refresh
+      window.dispatchEvent(new Event("invoices-updated"));
+
       return data;
     } catch (e) {
       alert("Network error while saving invoice");
@@ -69,7 +143,7 @@ export default function App() {
   }
 
   const handleCalculate = async () => {
-    // Safety locks as per your rules
+    // Safety lock: tread depth
     if (Number(treadDepth || 0) < 1.5) {
       alert("Installation blocked: Tread depth below 1.5mm.");
       return;
@@ -83,12 +157,11 @@ export default function App() {
       return;
     }
 
-    // Compute totals client-side just for display; server is source of truth
+    // Compute totals on client just for display; server is source of truth
     const totalBeforeGst = dosageMl * MRP_PER_ML;
     const gstAmount = totalBeforeGst * GST_RATE;
     const totalWithGst = totalBeforeGst + gstAmount;
 
-    // POST to API (only 3 fields required: customer_name, vehicle_number, dosage_ml)
     await saveInvoiceToServer({
       customer_name: customerName,
       mobile_number: mobileNumber || null,
@@ -101,7 +174,7 @@ export default function App() {
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
       dosage_ml: Number(dosageMl),
-      // gps_lat/gps_lng can be added later when you wire GPS
+      // gps wiring later
       gps_lat: null,
       gps_lng: null,
       customer_code: null
@@ -154,6 +227,9 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Recent invoices table */}
+      <RecentInvoices />
     </div>
   );
 }
