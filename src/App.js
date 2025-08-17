@@ -1,15 +1,11 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com"; // change if needed
-const API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // <-- same as Render API_KEY
-const BRAND_NAME = "MaxTT";
-const WATERMARK_TEXT = "MaxTT Billing - Treadstone Solutions";
-const COMPANY_NAME = "Treadstone Solutions";
-const COMPANY_SUB = "MaxTT Billing Prototype";
+const API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // same as Render API_KEY
 
-// --------- ASCII-safe INR formatter (Indian grouping) ----------
+// --------- ASCII-safe INR formatter ----------
 function inr(num) {
   const n = Math.round((Number(num) || 0) * 100) / 100;
   const [intPartRaw, dec = "00"] = n.toFixed(2).split(".");
@@ -21,7 +17,6 @@ function inr(num) {
   return `Rs. ${withCommas}.${dec}`;
 }
 
-// ---------- Vehicle categories (per your spec) ----------
 const VEHICLE_CFG = {
   "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
   "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.00, defaultTyres: 3, options: [3] },
@@ -41,40 +36,37 @@ function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   return roundTo25(dosage);
 }
 
-// ---------- PDF ----------
-function generateInvoicePDF(inv) {
+// ============== PDF =================
+function generateInvoicePDF(inv, profile) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 40;
-
-  // Use ASCII-safe font
   doc.setFont("helvetica", "normal");
 
-  // Watermark (light gray)
+  // Header left: Franchisee profile
+  doc.setFontSize(16);
+  doc.text(profile?.name || "Franchisee", margin, 40);
+  doc.setFontSize(11);
+  const addrLines = String(profile?.address || "").split(/\n|, /g).filter(Boolean);
+  addrLines.slice(0, 3).forEach((t, i) => doc.text(t, margin, 58 + i * 14));
+  doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, 58 + addrLines.length * 14 + 4);
+
+  // Header right: Invoice meta
+  const created = inv.created_at ? new Date(inv.created_at) : new Date();
+  const dateStr = created.toLocaleString();
+  doc.text(`Invoice ID: ${inv.id}`, pageWidth - margin, 40, { align: "right" });
+  doc.text(`Date: ${dateStr}`, pageWidth - margin, 58, { align: "right" });
+
+  // Title watermark
   doc.saveGraphicsState && doc.saveGraphicsState();
-  doc.setFontSize(60);
+  doc.setFontSize(56);
   doc.setTextColor(210);
-  doc.text(WATERMARK_TEXT, pageWidth / 2, 400, { angle: 35, align: "center" });
+  doc.text("MaxTT Billing", pageWidth / 2, 380, { angle: 35, align: "center" });
   doc.setTextColor(0);
   doc.restoreGraphicsState && doc.restoreGraphicsState();
 
-  // Header
-  doc.setFontSize(20);
-  doc.text(COMPANY_NAME, margin, 50);
-  doc.setFontSize(11);
-  doc.text(COMPANY_SUB, margin, 68);
-
-  // Title + meta
-  doc.setFontSize(16);
-  doc.text(`${BRAND_NAME} Invoice`, margin, 100);
-  const created = inv.created_at ? new Date(inv.created_at) : new Date();
-  const dateStr = created.toLocaleString();
-  doc.setFontSize(11);
-  doc.text(`Invoice ID: ${inv.id}`, pageWidth - margin, 50, { align: "right" });
-  doc.text(`Date: ${dateStr}`, pageWidth - margin, 68, { align: "right" });
-
   // Customer block
-  const yCustStart = 130;
+  const yCustStart = 110;
   doc.setFontSize(12);
   doc.text("Customer Details", margin, yCustStart);
   doc.setFontSize(11);
@@ -82,7 +74,7 @@ function generateInvoicePDF(inv) {
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
     `Vehicle: ${inv.vehicle_number || ""}`,
-    `GSTIN: ${inv.customer_gstin || ""}`,
+    `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
   ].forEach((t, i) => doc.text(t, margin, yCustStart + 18 + i * 16));
@@ -104,14 +96,13 @@ function generateInvoicePDF(inv) {
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`
   ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 18 + i * 16));
 
-  // Amounts (ASCII-safe)
+  // Amounts
   const price = Number(inv.price_per_ml ?? 0);
   const before = Number(inv.total_before_gst ?? 0);
   const gst = Number(inv.gst_amount ?? 0);
   const total = Number(inv.total_with_gst ?? 0);
-
   doc.autoTable({
-    startY: yCustStart + 160,
+    startY: yCustStart + 150,
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
@@ -121,26 +112,25 @@ function generateInvoicePDF(inv) {
       ["Total (with GST)", inr(total)]
     ],
     styles: { fontSize: 11, cellPadding: 6 },
-    headStyles: { fillColor: [60, 60, 60] } // softer than full black
+    headStyles: { fillColor: [60, 60, 60] }
   });
 
   // Footer
   const yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 24 : 500;
   doc.setFontSize(10);
   doc.text(
-    "This invoice is system-generated. Pricing and GST are computed per configured rates. © " + new Date().getFullYear() + " " + COMPANY_NAME,
-    margin,
-    yAfter
+    "This invoice is system-generated. Pricing and GST are computed per configured rates.",
+    margin, yAfter
   );
 
-  doc.save(`${BRAND_NAME}_Invoice_${inv.id || "draft"}.pdf`);
+  doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
 
-// ---------- Recent Invoices ----------
-function RecentInvoices() {
-  const [rows, setRows] = React.useState([]);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState("");
+// ============== Recent Invoices =================
+function RecentInvoices({ profile }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const fetchRows = React.useCallback(() => {
     setLoading(true);
@@ -156,14 +146,12 @@ function RecentInvoices() {
       });
   }, []);
 
-  React.useEffect(() => {
+  useEffect(() => {
     fetchRows();
     const onUpdated = () => fetchRows();
     window.addEventListener("invoices-updated", onUpdated);
     return () => window.removeEventListener("invoices-updated", onUpdated);
   }, [fetchRows]);
-
-  const safe = (n) => (n == null ? "" : n);
 
   if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
   if (error) return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
@@ -198,15 +186,15 @@ function RecentInvoices() {
                   <tr key={r.id}>
                     <td>{r.id}</td>
                     <td>{new Date(r.created_at).toLocaleString()}</td>
-                    <td>{safe(r.customer_name)}</td>
-                    <td>{safe(r.vehicle_number)}</td>
-                    <td>{safe(r.vehicle_type)}</td>
-                    <td>{safe(r.tyre_count)}</td>
-                    <td>{safe(r.fitment_locations)}</td>
+                    <td>{r.customer_name ?? ""}</td>
+                    <td>{r.vehicle_number ?? ""}</td>
+                    <td>{r.vehicle_type ?? ""}</td>
+                    <td>{r.tyre_count ?? ""}</td>
+                    <td>{r.fitment_locations || ""}</td>
                     <td>{perTyre ?? ""}</td>
-                    <td>{safe(r.dosage_ml)}</td>
+                    <td>{r.dosage_ml ?? ""}</td>
                     <td>{inr(r.total_with_gst)}</td>
-                    <td><button onClick={() => generateInvoicePDF(r)}>Download PDF</button></td>
+                    <td><button onClick={() => generateInvoicePDF(r, profile)}>Download PDF</button></td>
                   </tr>
                 );
               })}
@@ -218,7 +206,17 @@ function RecentInvoices() {
   );
 }
 
+// =================== MAIN APP (with login) ====================
 export default function App() {
+  const [token, setToken] = useState(() => localStorage.getItem("maxtt_token") || "");
+  const [profile, setProfile] = useState(null);
+
+  // Login form
+  const [fid, setFid] = useState("");        // Franchisee ID
+  const [fpw, setFpw] = useState("");        // Password
+  const [loginErr, setLoginErr] = useState("");
+
+  // Form fields (same as before)
   const [customerName, setCustomerName] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
@@ -235,15 +233,18 @@ export default function App() {
   const [dosagePerTyre, setDosagePerTyre] = useState(null);
   const [dosageTotal, setDosageTotal] = useState(null);
 
-  // GSTIN & Address
   const [gstin, setGstin] = useState("");
   const [address, setAddress] = useState("");
 
-  // Fitment checkboxes
   const [fitFL, setFitFL] = useState(false);
   const [fitFR, setFitFR] = useState(false);
   const [fitRL, setFitRL] = useState(false);
   const [fitRR, setFitRR] = useState(false);
+
+  // Fetch franchisee profile once (no auth required)
+  useEffect(() => {
+    fetch(`${API_URL}/api/profile`).then(r => r.json()).then(setProfile).catch(() => {});
+  }, []);
 
   function onVehicleTypeChange(v) {
     setVehicleType(v);
@@ -260,13 +261,34 @@ export default function App() {
     return parts.join(", ");
   }
 
+  async function doLogin() {
+    setLoginErr("");
+    try {
+      const res = await fetch(`${API_URL}/api/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: fid, password: fpw })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLoginErr(data?.error === "invalid_credentials" ? "Invalid ID or password" : "Login failed");
+        return;
+      }
+      localStorage.setItem("maxtt_token", data.token);
+      setToken(data.token);
+    } catch (e) {
+      setLoginErr("Network error");
+    }
+  }
+
   async function saveInvoiceToServer(payload) {
     try {
       const res = await fetch(`${API_URL}/api/invoices`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": API_KEY
+          "x-api-key": API_KEY,
+          "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify(payload)
       });
@@ -291,13 +313,11 @@ export default function App() {
       alert("Installation blocked: Tread depth below 1.5mm.");
       return;
     }
-
     const tCount = parseInt(tyreCount || "0", 10);
     if (!tCount || tCount < 1) {
       alert("Please select number of tyres.");
       return;
     }
-
     const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const totalMl = perTyre * tCount;
 
@@ -335,9 +355,45 @@ export default function App() {
 
   const tyreOptions = (VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger car/van/SUV)"]).options || [4];
 
+  // -------------- If not logged in, show login screen --------------
+  if (!token) {
+    return (
+      <div style={{ maxWidth: 420, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
+        <h2 style={{ marginTop: 0 }}>Franchisee Login</h2>
+        <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
+          <input placeholder="Franchisee ID" value={fid} onChange={e => setFid(e.target.value)} />
+          <input placeholder="Password" type="password" value={fpw} onChange={e => setFpw(e.target.value)} />
+          {loginErr && <div style={{ color: "crimson" }}>{loginErr}</div>}
+          <button onClick={doLogin}>Login</button>
+        </div>
+        {profile && (
+          <div style={{ marginTop: 16, fontSize: 12, color: "#555" }}>
+            <div><strong>Franchisee (for invoice header):</strong></div>
+            <div>{profile.name}</div>
+            <div>{profile.address}</div>
+            <div>GSTIN: {profile.gstin}</div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // -------------- Main app (logged in) --------------
   return (
     <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
-      <h1>MaxTT Billing & Dosage Calculator</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <h1>MaxTT Billing & Dosage Calculator</h1>
+        <div>
+          <button onClick={() => { localStorage.removeItem("maxtt_token"); setToken(""); }}>Logout</button>
+        </div>
+      </div>
+
+      {profile && (
+        <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13 }}>
+          <strong>Franchisee:</strong> {profile.name} &nbsp;|&nbsp; <strong>GSTIN:</strong> {profile.gstin}
+          <div style={{ color: "#666" }}>{profile.address}</div>
+        </div>
+      )}
 
       {/* Top grid */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
@@ -349,7 +405,7 @@ export default function App() {
         <input placeholder="Installer Name" value={installerName} onChange={e => setInstallerName(e.target.value)} />
       </div>
 
-      {/* GSTIN & Address */}
+      {/* Customer GSTIN & Address */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
         <input placeholder="Customer GSTIN (optional)" value={gstin} onChange={e => setGstin(e.target.value)} />
         <input placeholder="Billing Address (optional)" value={address} onChange={e => setAddress(e.target.value)} />
@@ -366,7 +422,7 @@ export default function App() {
         <div>
           <label style={{ marginRight: 8 }}>Number of Tyres</label>
           <select value={tyreCount} onChange={e => setTyreCount(e.target.value)}>
-            {tyreOptions.map(n => <option key={n} value={n}>{n}</option>)}
+            {(VEHICLE_CFG[vehicleType]?.options || [4]).map(n => <option key={n} value={n}>{n}</option>)}
           </select>
           <div style={{ fontSize: 12, color: "#666" }}>
             (Auto-selected by category; HTV lets you choose 8/10/12/14/16)
@@ -413,7 +469,7 @@ export default function App() {
         </div>
       )}
 
-      <RecentInvoices />
+      <RecentInvoices profile={profile} />
     </div>
   );
 }
