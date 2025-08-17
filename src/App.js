@@ -8,8 +8,20 @@ const BRAND_NAME = "MaxTT";
 const WATERMARK_TEXT = "MaxTT Billing - Treadstone Solutions";
 const COMPANY_NAME = "Treadstone Solutions";
 const COMPANY_SUB = "MaxTT Billing Prototype";
-const CURRENCY_FMT = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
 
+// --------- ASCII-safe INR formatter (Indian grouping) ----------
+function inr(num) {
+  const n = Math.round((Number(num) || 0) * 100) / 100;
+  const [intPartRaw, dec = "00"] = n.toFixed(2).split(".");
+  const intPart = String(intPartRaw);
+  if (intPart.length <= 3) return `Rs. ${intPart}.${dec}`;
+  const last3 = intPart.slice(-3);
+  const other = intPart.slice(0, -3);
+  const withCommas = other.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + last3;
+  return `Rs. ${withCommas}.${dec}`;
+}
+
+// ---------- Vehicle categories (per your spec) ----------
 const VEHICLE_CFG = {
   "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
   "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.00, defaultTyres: 3, options: [3] },
@@ -35,18 +47,24 @@ function generateInvoicePDF(inv) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 40;
 
+  // Use ASCII-safe font
+  doc.setFont("helvetica", "normal");
+
+  // Watermark (light gray)
   doc.saveGraphicsState && doc.saveGraphicsState();
   doc.setFontSize(60);
-  doc.setTextColor(225);
+  doc.setTextColor(210);
   doc.text(WATERMARK_TEXT, pageWidth / 2, 400, { angle: 35, align: "center" });
   doc.setTextColor(0);
   doc.restoreGraphicsState && doc.restoreGraphicsState();
 
+  // Header
   doc.setFontSize(20);
   doc.text(COMPANY_NAME, margin, 50);
   doc.setFontSize(11);
   doc.text(COMPANY_SUB, margin, 68);
 
+  // Title + meta
   doc.setFontSize(16);
   doc.text(`${BRAND_NAME} Invoice`, margin, 100);
   const created = inv.created_at ? new Date(inv.created_at) : new Date();
@@ -55,20 +73,21 @@ function generateInvoicePDF(inv) {
   doc.text(`Invoice ID: ${inv.id}`, pageWidth - margin, 50, { align: "right" });
   doc.text(`Date: ${dateStr}`, pageWidth - margin, 68, { align: "right" });
 
+  // Customer block
   const yCustStart = 130;
   doc.setFontSize(12);
   doc.text("Customer Details", margin, yCustStart);
   doc.setFontSize(11);
-  const custLines = [
+  [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
     `Vehicle: ${inv.vehicle_number || ""}`,
     `GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
-  ];
-  custLines.forEach((t, i) => doc.text(t, margin, yCustStart + 18 + i * 16));
+  ].forEach((t, i) => doc.text(t, margin, yCustStart + 18 + i * 16));
 
+  // Tyre/Vehicle block
   const yTyreStart = yCustStart;
   const xRight = pageWidth / 2 + 20;
   doc.setFontSize(12);
@@ -85,6 +104,7 @@ function generateInvoicePDF(inv) {
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`
   ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 18 + i * 16));
 
+  // Amounts (ASCII-safe)
   const price = Number(inv.price_per_ml ?? 0);
   const before = Number(inv.total_before_gst ?? 0);
   const gst = Number(inv.gst_amount ?? 0);
@@ -95,15 +115,16 @@ function generateInvoicePDF(inv) {
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
-      ["MRP per ml", CURRENCY_FMT.format(price)],
-      ["Amount (before GST)", CURRENCY_FMT.format(before)],
-      ["GST", CURRENCY_FMT.format(gst)],
-      ["Total (with GST)", CURRENCY_FMT.format(total)]
+      ["MRP per ml", inr(price)],
+      ["Amount (before GST)", inr(before)],
+      ["GST", inr(gst)],
+      ["Total (with GST)", inr(total)]
     ],
     styles: { fontSize: 11, cellPadding: 6 },
-    headStyles: { fillColor: [0, 0, 0] }
+    headStyles: { fillColor: [60, 60, 60] } // softer than full black
   });
 
+  // Footer
   const yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 24 : 500;
   doc.setFontSize(10);
   doc.text(
@@ -142,8 +163,7 @@ function RecentInvoices() {
     return () => window.removeEventListener("invoices-updated", onUpdated);
   }, [fetchRows]);
 
-  const inr = (n) =>
-    n == null ? "" : new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(n);
+  const safe = (n) => (n == null ? "" : n);
 
   if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
   if (error) return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
@@ -167,7 +187,7 @@ function RecentInvoices() {
                 <th>Fitment</th>
                 <th>Per-tyre (ml)</th>
                 <th>Total Dosage (ml)</th>
-                <th>Total (₹ with GST)</th>
+                <th>Total (₹)</th>
                 <th>PDF</th>
               </tr>
             </thead>
@@ -178,13 +198,13 @@ function RecentInvoices() {
                   <tr key={r.id}>
                     <td>{r.id}</td>
                     <td>{new Date(r.created_at).toLocaleString()}</td>
-                    <td>{r.customer_name}</td>
-                    <td>{r.vehicle_number}</td>
-                    <td>{r.vehicle_type}</td>
-                    <td>{r.tyre_count ?? ""}</td>
-                    <td>{r.fitment_locations || ""}</td>
+                    <td>{safe(r.customer_name)}</td>
+                    <td>{safe(r.vehicle_number)}</td>
+                    <td>{safe(r.vehicle_type)}</td>
+                    <td>{safe(r.tyre_count)}</td>
+                    <td>{safe(r.fitment_locations)}</td>
                     <td>{perTyre ?? ""}</td>
-                    <td>{r.dosage_ml}</td>
+                    <td>{safe(r.dosage_ml)}</td>
                     <td>{inr(r.total_with_gst)}</td>
                     <td><button onClick={() => generateInvoicePDF(r)}>Download PDF</button></td>
                   </tr>
@@ -220,13 +240,10 @@ export default function App() {
   const [address, setAddress] = useState("");
 
   // Fitment checkboxes
-  const [fitFL, setFitFL] = useState(false); // Front Left
-  const [fitFR, setFitFR] = useState(false); // Front Right
-  const [fitRL, setFitRL] = useState(false); // Rear Left
-  const [fitRR, setFitRR] = useState(false); // Rear Right
-
-  const MRP_PER_ML = 4.5;
-  const GST_RATE = 0.18;
+  const [fitFL, setFitFL] = useState(false);
+  const [fitFR, setFitFR] = useState(false);
+  const [fitRL, setFitRL] = useState(false);
+  const [fitRR, setFitRR] = useState(false);
 
   function onVehicleTypeChange(v) {
     setVehicleType(v);
@@ -259,7 +276,7 @@ export default function App() {
         return null;
       }
       alert(
-        `Invoice saved.\nID: ${data.id}\nTotal (before GST): ${CURRENCY_FMT.format(data.total_before_gst || 0)}\nGST: ${CURRENCY_FMT.format(data.gst_amount || 0)}\nTotal (with GST): ${CURRENCY_FMT.format(data.total_with_gst || 0)}`
+        `Invoice saved.\nID: ${data.id}\nTotal (before GST): ${inr(data.total_before_gst || 0)}\nGST: ${inr(data.gst_amount || 0)}\nTotal (with GST): ${inr(data.total_with_gst || 0)}`
       );
       window.dispatchEvent(new Event("invoices-updated"));
       return data;
