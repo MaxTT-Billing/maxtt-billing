@@ -3,7 +3,7 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com";
-// 👇 Replace with the exact same value you set in the API Environment as API_KEY
+// 🔐 MUST match Render API env var API_KEY
 const API_KEY = "REPLACE_WITH_YOUR_API_KEY";
 
 // ---------- INR (ASCII-safe) ----------
@@ -23,50 +23,50 @@ const VEHICLE_CFG = {
   "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
   "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.00, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
-  // Backward-compatibility for older rows (lowercase "van")
+  // Back-compat (old lowercase “car/van” rows may exist)
   "4-Wheeler (Passenger car/van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   "6-Wheeler (Bus/LTV)":            { k: 3.00, bufferPct: 0.00, defaultTyres: 6, options: [6] },
   "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.00, bufferPct: 0.00, defaultTyres: 8, options: [8,10,12,14,16] }
 };
+
 function roundTo25(x) { return Math.round(x / 25) * 25; }
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
-  const entry =
-    VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
+  const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
   const widthIn = Number(widthMm || 0) * 0.03937;
-  const totalHeightIn =
-    widthIn * (Number(aspectPct || 0) / 100) * 2 + Number(rimIn || 0);
-  let dosage = widthIn * totalHeightIn * entry.k;
+  const totalHeightIn = (widthIn * (Number(aspectPct || 0) / 100) * 2) + Number(rimIn || 0);
+  let dosage = (widthIn * totalHeightIn * entry.k);
   dosage = dosage * (1 + entry.bufferPct);
   return roundTo25(dosage);
 }
 
-// ---------- Fitment options per category ----------
-const FITMENT_OPTIONS_MAP = {
-  "2-Wheeler (Scooter/Motorcycle)": ["Front", "Rear"],
-  "3-Wheeler (Auto)": ["Front", "Rear Left", "Rear Right"],
-  "4-Wheeler (Passenger Car/Van/SUV)": [
-    "Front Left",
-    "Front Right",
-    "Rear Left",
-    "Rear Right",
-  ],
-  // For anything else, we’ll fall back to 4-corner labels
-};
-const FALLBACK_FITMENTS = [
-  "Front Left",
-  "Front Right",
-  "Rear Left",
-  "Rear Right",
-];
-function getFitmentOptions(vtype) {
-  return (
-    FITMENT_OPTIONS_MAP[vtype] ||
-    FITMENT_OPTIONS_MAP["4-Wheeler (Passenger Car/Van/SUV)"] ||
-    FALLBACK_FITMENTS
-  );
+// ---------- Fitment schema (list for ≤4 wheels, grouped for ≥6) ----------
+function fitmentSchema(vehicleType, tyreCount) {
+  if (vehicleType === "2-Wheeler (Scooter/Motorcycle)") {
+    return { mode: "list", labels: ["Front", "Rear"] };
+  }
+  if (vehicleType === "3-Wheeler (Auto)") {
+    return { mode: "list", labels: ["Front", "Rear Left", "Rear Right"] };
+  }
+  if (vehicleType.startsWith("4-Wheeler")) {
+    return { mode: "list", labels: ["Front Left", "Front Right", "Rear Left", "Rear Right"] };
+  }
+  // 6-Wheeler and HTV: grouped rear by side
+  const t = Number(tyreCount || 0);
+  // two fronts assumed possible, the rest split evenly by side
+  const rearEach = Math.max(2, Math.floor((t - 2) / 2));
+  return {
+    mode: "grouped",
+    labels: [
+      "Front Left",
+      "Front Right",
+      `Rear Left ×${rearEach}`,
+      `Rear Right ×${rearEach}`
+    ],
+    rearEach
+  };
 }
-function textFromFitmentState(obj) {
-  return Object.entries(obj)
+function textFromFitState(stateObj) {
+  return Object.entries(stateObj)
     .filter(([, v]) => !!v)
     .map(([k]) => k)
     .join(", ");
@@ -83,13 +83,10 @@ function generateInvoicePDF(inv, profile) {
   doc.setFontSize(16);
   doc.text(profile?.name || "Franchisee", margin, 40);
   doc.setFontSize(11);
-  const addrLines = String(profile?.address || "")
-    .split(/\n|, /g)
-    .filter(Boolean);
+  const addrLines = String(profile?.address || "").split(/\n|, /g).filter(Boolean);
   addrLines.slice(0, 3).forEach((t, i) => doc.text(t, margin, 58 + i * 14));
   let y = 58 + addrLines.length * 14 + 4;
-  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, margin, y);
-  y += 14;
+  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, margin, y); y += 14;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, y);
 
   // Invoice meta
@@ -117,7 +114,7 @@ function generateInvoicePDF(inv, profile) {
     `Vehicle: ${inv.vehicle_number || ""}`,
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
-    `Installer: ${inv.installer_name || ""}`,
+    `Installer: ${inv.installer_name || ""}`
   ].forEach((t, i) => doc.text(t, margin, yCustStart + 18 + i * 16));
 
   // Tyre/Vehicle block
@@ -126,19 +123,15 @@ function generateInvoicePDF(inv, profile) {
   doc.setFontSize(12);
   doc.text("Tyre / Vehicle", xRight, yTyreStart);
   doc.setFontSize(11);
-  const perTyre = inv.tyre_count
-    ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25
-    : null;
+  const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25 : null;
   [
     `Vehicle Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
-    `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${
-      inv.rim_diameter_in || ""
-    }`,
+    `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
     `Tread Depth: ${inv.tread_depth_mm ?? ""} mm`,
     `Fitment: ${inv.fitment_locations || ""}`,
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
-    `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
+    `Total Dosage: ${inv.dosage_ml ?? ""} ml`
   ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 18 + i * 16));
 
   // Amounts
@@ -154,22 +147,15 @@ function generateInvoicePDF(inv, profile) {
       ["MRP per ml", inr(price)],
       ["Amount (before GST)", inr(before)],
       ["GST", inr(gst)],
-      ["Total (with GST)", inr(total)],
+      ["Total (with GST)", inr(total)]
     ],
     styles: { fontSize: 11, cellPadding: 6 },
-    headStyles: { fillColor: [60, 60, 60] },
+    headStyles: { fillColor: [60, 60, 60] }
   });
 
-  const yAfter =
-    (doc.lastAutoTable && doc.lastAutoTable.finalY)
-      ? doc.lastAutoTable.finalY + 24
-      : 500;
+  const yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 24 : 500;
   doc.setFontSize(10);
-  doc.text(
-    "This invoice is system-generated. Pricing and GST are computed per configured rates.",
-    margin,
-    yAfter
-  );
+  doc.text("This invoice is system-generated. Pricing and GST are computed per configured rates.", margin, yAfter);
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
@@ -186,15 +172,11 @@ function LoginView({ onLoggedIn }) {
       const res = await fetch(`${API_URL}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: fid, password: fpw }),
+        body: JSON.stringify({ id: fid, password: fpw })
       });
       const data = await res.json();
       if (!res.ok) {
-        setErr(
-          data?.error === "invalid_credentials"
-            ? "Invalid ID or password"
-            : "Login failed"
-        );
+        setErr(data?.error === "invalid_credentials" ? "Invalid ID or password" : "Login failed");
         return;
       }
       localStorage.setItem("maxtt_token", data.token);
@@ -205,28 +187,11 @@ function LoginView({ onLoggedIn }) {
   }
 
   return (
-    <div
-      style={{
-        maxWidth: 420,
-        margin: "120px auto",
-        padding: 16,
-        border: "1px solid #ddd",
-        borderRadius: 8,
-      }}
-    >
+    <div style={{ maxWidth: 420, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
       <h2 style={{ marginTop: 0 }}>Franchisee Login</h2>
       <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
-        <input
-          placeholder="Franchisee ID"
-          value={fid}
-          onChange={(e) => setFid(e.target.value)}
-        />
-        <input
-          placeholder="Password"
-          type="password"
-          value={fpw}
-          onChange={(e) => setFpw(e.target.value)}
-        />
+        <input placeholder="Franchisee ID" value={fid} onChange={e => setFid(e.target.value)} />
+        <input placeholder="Password" type="password" value={fpw} onChange={e => setFpw(e.target.value)} />
         {err && <div style={{ color: "crimson" }}>{err}</div>}
         <button onClick={doLogin}>Login</button>
       </div>
@@ -256,33 +221,16 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
     if (to) params.set("to", to);
     params.set("limit", "500");
 
-    fetch(`${API_URL}/api/invoices?${params.toString()}`, {
-      headers: headersAuth,
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        setRows(Array.isArray(data) ? data : []);
-        setLoading(false);
-      })
-      .catch(() => {
-        setError("Could not load invoices");
-        setLoading(false);
-      });
+    fetch(`${API_URL}/api/invoices?${params.toString()}`, { headers: headersAuth })
+      .then(r => r.json())
+      .then(data => { setRows(Array.isArray(data) ? data : []); setLoading(false); })
+      .catch(() => { setError("Could not load invoices"); setLoading(false); });
 
-    fetch(`${API_URL}/api/summary?${params.toString()}`, {
-      headers: headersAuth,
-    })
-      .then((r) => r.json())
-      .then(setSummary)
-      .catch(() => setSummary(null));
+    fetch(`${API_URL}/api/summary?${params.toString()}`, { headers: headersAuth })
+      .then(r => r.json()).then(setSummary).catch(() => setSummary(null));
   }, [q, from, to, token]);
 
-  // auto-search
-  useEffect(() => {
-    const t = setTimeout(fetchRows, 400);
-    return () => clearTimeout(t);
-  }, [q, from, to, fetchRows]);
-
+  useEffect(() => { const t = setTimeout(fetchRows, 400); return () => clearTimeout(t); }, [q, from, to, fetchRows]);
   useEffect(() => {
     fetchRows();
     const onUpdated = () => fetchRows();
@@ -295,9 +243,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
     if (q) params.set("q", q);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
-    fetch(`${API_URL}/api/invoices/export?${params.toString()}`, {
-      headers: headersAuth,
-    })
+    fetch(`${API_URL}/api/invoices/export?${params.toString()}`, { headers: headersAuth })
       .then(async (r) => {
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
@@ -320,35 +266,15 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
       <h2>Invoices</h2>
 
       {/* Filters */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          alignItems: "center",
-          marginBottom: 10,
-          border: "1px solid #eee",
-          padding: 8,
-          borderRadius: 6,
-        }}
-      >
-        <input
-          placeholder="Search name or vehicle no."
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          style={{ flex: 1, minWidth: 280 }}
-        />
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center",
+                    marginBottom: 10, border: "1px solid #eee", padding: 8, borderRadius: 6 }}>
+        <input placeholder="Search name or vehicle no." value={q} onChange={e => setQ(e.target.value)}
+               style={{ flex: 1, minWidth: 280 }} />
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          From:
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-          />
+          From: <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          To:
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+          To: <input type="date" value={to} onChange={e => setTo(e.target.value)} />
         </label>
         <button onClick={fetchRows}>Apply</button>
         <button onClick={() => { setQ(""); setFrom(""); setTo(""); }}>Show All</button>
@@ -389,7 +315,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {rows.map(r => (
                 <tr key={r.id}>
                   <td>{r.id}</td>
                   <td>{new Date(r.created_at).toLocaleString()}</td>
@@ -400,14 +326,8 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
                   <td>{r.fitment_locations || ""}</td>
                   <td>{r.dosage_ml ?? ""}</td>
                   <td>{inr(r.total_with_gst)}</td>
-                  <td>
-                    <button onClick={() => generateInvoicePDF(r, profile)}>
-                      PDF
-                    </button>
-                  </td>
-                  <td>
-                    <button onClick={() => onOpenDetails(r.id)}>Open</button>
-                  </td>
+                  <td><button onClick={() => generateInvoicePDF(r, profile)}>PDF</button></td>
+                  <td><button onClick={() => onOpenDetails(r.id)}>Open</button></td>
                 </tr>
               ))}
             </tbody>
@@ -418,7 +338,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
   );
 }
 
-// ---------- Details + Edit modal (dynamic fitments) ----------
+// ---------- Details + Edit modal (uses same schema) ----------
 function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
   const [inv, setInv] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -428,18 +348,16 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
 
   useEffect(() => {
     fetch(`${API_URL}/api/invoices/${invoiceId}`, { headers: authHeaders })
-      .then((r) => r.json())
-      .then((data) => setInv(data))
-      .catch(() => setInv(null));
+      .then(r => r.json()).then(setInv).catch(() => setInv(null));
   }, [invoiceId]);
 
   useEffect(() => {
     if (inv) {
       const vtype = inv.vehicle_type || "4-Wheeler (Passenger Car/Van/SUV)";
-      const opts = getFitmentOptions(vtype);
+      const schema = fitmentSchema(vtype, inv.tyre_count);
       const selected = {};
       const text = inv.fitment_locations || "";
-      opts.forEach((o) => (selected[o] = text.includes(o)));
+      schema.labels.forEach(l => (selected[l] = text.includes(l)));
       setFit(selected);
 
       setForm({
@@ -456,16 +374,23 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
         tyre_count: inv.tyre_count ?? "",
         customer_gstin: inv.customer_gstin || "",
         customer_address: inv.customer_address || "",
-        dosage_ml: inv.dosage_ml ?? "",
+        dosage_ml: inv.dosage_ml ?? ""
       });
     }
   }, [inv]);
 
-  function changeVehicleTypeInEdit(v) {
-    setForm((f) => ({ ...f, vehicle_type: v }));
-    const opts = getFitmentOptions(v);
+  function onChangeVehicleType(v) {
+    setForm(f => ({ ...f, vehicle_type: v }));
+    const schema = fitmentSchema(v, form.tyre_count);
     const next = {};
-    opts.forEach((o) => (next[o] = false));
+    schema.labels.forEach(l => (next[l] = false));
+    setFit(next);
+  }
+  function onChangeTyreCount(n) {
+    setForm(f => ({ ...f, tyre_count: n }));
+    const schema = fitmentSchema(form.vehicle_type, n);
+    const next = {};
+    schema.labels.forEach(l => (next[l] = false));
     setFit(next);
   }
 
@@ -479,7 +404,7 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
       rim_diameter_in: form.rim_diameter_in === "" ? null : Number(form.rim_diameter_in),
       tyre_count: form.tyre_count === "" ? null : Number(form.tyre_count),
       dosage_ml: form.dosage_ml === "" ? null : Number(form.dosage_ml),
-      fitment_locations: textFromFitmentState(fit),
+      fitment_locations: textFromFitState(fit)
     };
 
     try {
@@ -488,22 +413,17 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
         headers: {
           "Content-Type": "application/json",
           "x-api-key": API_KEY,
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
-      if (!res.ok) {
-        alert("Update failed: " + (data?.error || "unknown_error"));
-        return;
-      }
+      if (!res.ok) { alert("Update failed: " + (data?.error || "unknown_error")); return; }
       alert("Invoice updated");
       setEditing(false);
       onEdited && onEdited();
       fetch(`${API_URL}/api/invoices/${invoiceId}`, { headers: authHeaders })
-        .then((r) => r.json())
-        .then(setInv)
-        .catch(() => {});
+        .then(r => r.json()).then(setInv).catch(() => {});
       window.dispatchEvent(new Event("invoices-updated"));
     } catch {
       alert("Network error");
@@ -515,15 +435,13 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
       <div style={modalWrap}>
         <div style={modalBox}>
           <div>Loading…</div>
-          <div style={{ textAlign: "right", marginTop: 10 }}>
-            <button onClick={onClose}>Close</button>
-          </div>
+          <div style={{ textAlign: "right", marginTop: 10 }}><button onClick={onClose}>Close</button></div>
         </div>
       </div>
     );
   }
 
-  const currentFitOptions = getFitmentOptions(form.vehicle_type || inv.vehicle_type);
+  const editSchema = fitmentSchema(form.vehicle_type, form.tyre_count);
 
   return (
     <div style={modalWrap}>
@@ -531,19 +449,9 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h3 style={{ margin: 0 }}>Invoice #{inv.id}</h3>
           <div>
-            <button onClick={() => generateInvoicePDF(inv, profile)} style={{ marginRight: 8 }}>
-              Reprint PDF
-            </button>
-            {!editing && (
-              <button onClick={() => setEditing(true)} style={{ marginRight: 8 }}>
-                Edit
-              </button>
-            )}
-            {editing && (
-              <button onClick={saveEdits} style={{ marginRight: 8 }}>
-                Save
-              </button>
-            )}
+            <button onClick={() => generateInvoicePDF(inv, profile)} style={{ marginRight: 8 }}>Reprint PDF</button>
+            {!editing && <button onClick={() => setEditing(true)} style={{ marginRight: 8 }}>Edit</button>}
+            {editing && <button onClick={saveEdits} style={{ marginRight: 8 }}>Save</button>}
             <button onClick={onClose}>Close</button>
           </div>
         </div>
@@ -565,40 +473,55 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
-            <input placeholder="Customer Name" value={form.customer_name} onChange={e => setForm(f => ({...f, customer_name: e.target.value}))} />
-            <input placeholder="Mobile Number" value={form.mobile_number} onChange={e => setForm(f => ({...f, mobile_number: e.target.value}))} />
-            <input placeholder="Vehicle Number" value={form.vehicle_number} onChange={e => setForm(f => ({...f, vehicle_number: e.target.value}))} />
-            <input placeholder="Odometer" value={form.odometer} onChange={e => setForm(f => ({...f, odometer: e.target.value}))} />
-            <input placeholder="Tread Depth (mm)" value={form.tread_depth_mm} onChange={e => setForm(f => ({...f, tread_depth_mm: e.target.value}))} />
-            <input placeholder="Installer Name" value={form.installer_name} onChange={e => setForm(f => ({...f, installer_name: e.target.value}))} />
+            <input placeholder="Customer Name" value={form.customer_name}
+                   onChange={e => setForm(f => ({...f, customer_name: e.target.value}))} />
+            <input placeholder="Mobile Number" value={form.mobile_number}
+                   onChange={e => setForm(f => ({...f, mobile_number: e.target.value}))} />
+            <input placeholder="Vehicle Number" value={form.vehicle_number}
+                   onChange={e => setForm(f => ({...f, vehicle_number: e.target.value}))} />
+            <input placeholder="Odometer" value={form.odometer}
+                   onChange={e => setForm(f => ({...f, odometer: e.target.value}))} />
+            <input placeholder="Tread Depth (mm)" value={form.tread_depth_mm}
+                   onChange={e => setForm(f => ({...f, tread_depth_mm: e.target.value}))} />
+            <input placeholder="Installer Name" value={form.installer_name}
+                   onChange={e => setForm(f => ({...f, installer_name: e.target.value}))} />
 
             <div style={{ gridColumn: "1 / span 2" }}>
               <label style={{ marginRight: 8 }}>Vehicle Category</label>
-              <select value={form.vehicle_type} onChange={e => changeVehicleTypeInEdit(e.target.value)}>
-                {Object.keys(VEHICLE_CFG).filter(k => !k.includes("car/van")).map(v => <option key={v}>{v}</option>)}
-                {/* show corrected label (Car/Van) not the old lowercase one */}
-                <option>{"4-Wheeler (Passenger Car/Van/SUV)"}</option>
+              <select value={form.vehicle_type} onChange={e => onChangeVehicleType(e.target.value)}>
+                <option>2-Wheeler (Scooter/Motorcycle)</option>
+                <option>3-Wheeler (Auto)</option>
+                <option>4-Wheeler (Passenger Car/Van/SUV)</option>
+                <option>6-Wheeler (Bus/LTV)</option>
+                <option>HTV (>6 wheels: Trucks/Trailers/Mining)</option>
               </select>
             </div>
 
-            <input placeholder="Tyre Width (mm)" value={form.tyre_width_mm} onChange={e => setForm(f => ({...f, tyre_width_mm: e.target.value}))} />
-            <input placeholder="Aspect Ratio (%)" value={form.aspect_ratio} onChange={e => setForm(f => ({...f, aspect_ratio: e.target.value}))} />
-            <input placeholder="Rim Diameter (in)" value={form.rim_diameter_in} onChange={e => setForm(f => ({...f, rim_diameter_in: e.target.value}))} />
-            <input placeholder="Tyre Count" value={form.tyre_count} onChange={e => setForm(f => ({...f, tyre_count: e.target.value}))} />
+            <input placeholder="Tyre Width (mm)" value={form.tyre_width_mm}
+                   onChange={e => setForm(f => ({...f, tyre_width_mm: e.target.value}))} />
+            <input placeholder="Aspect Ratio (%)" value={form.aspect_ratio}
+                   onChange={e => setForm(f => ({...f, aspect_ratio: e.target.value}))} />
+            <input placeholder="Rim Diameter (in)" value={form.rim_diameter_in}
+                   onChange={e => setForm(f => ({...f, rim_diameter_in: e.target.value}))} />
+            <input placeholder="Tyre Count" value={form.tyre_count}
+                   onChange={e => onChangeTyreCount(e.target.value)} />
 
-            <input placeholder="Customer GSTIN" value={form.customer_gstin} onChange={e => setForm(f => ({...f, customer_gstin: e.target.value}))} />
-            <input placeholder="Customer Address" value={form.customer_address} onChange={e => setForm(f => ({...f, customer_address: e.target.value}))} />
+            <input placeholder="Customer GSTIN" value={form.customer_gstin}
+                   onChange={e => setForm(f => ({...f, customer_gstin: e.target.value}))} />
+            <input placeholder="Customer Address" value={form.customer_address}
+                   onChange={e => setForm(f => ({...f, customer_address: e.target.value}))} />
 
-            <input placeholder="Total Dosage (ml)" value={form.dosage_ml} onChange={e => setForm(f => ({...f, dosage_ml: e.target.value}))} />
+            <input placeholder="Total Dosage (ml)" value={form.dosage_ml}
+                   onChange={e => setForm(f => ({...f, dosage_ml: e.target.value}))} />
 
             <div style={{ gridColumn: "1 / span 2", marginTop: 6 }}>
               <div><strong>Fitment (tick):</strong></div>
-              {currentFitOptions.map((label) => (
+              {editSchema.labels.map((label) => (
                 <label key={label} style={{ marginRight: 12 }}>
                   <input
                     type="checkbox"
                     checked={!!fit[label]}
-                    onChange={(e) => setFit((prev) => ({ ...prev, [label]: e.target.checked }))}
+                    onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))}
                   />{" "}
                   {label}
                 </label>
@@ -610,10 +533,12 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
     </div>
   );
 }
-const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 };
+
+const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", display: "flex",
+                    alignItems: "center", justifyContent: "center", padding: 16 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
-// ---------- Main App (create form uses dynamic fitments too) ----------
+// ---------- Main App ----------
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("maxtt_token") || "");
   const [profile, setProfile] = useState(null);
@@ -658,16 +583,25 @@ export default function App() {
   // dynamic fitments for create form
   const [fit, setFit] = useState(() => {
     const init = {};
-    getFitmentOptions("4-Wheeler (Passenger Car/Van/SUV)").forEach((o) => (init[o] = false));
+    fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
     return init;
   });
 
   function onVehicleTypeChange(v) {
     setVehicleType(v);
     const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
-    setTyreCount(cfg.defaultTyres);
+    const nextTyres = cfg.defaultTyres;
+    setTyreCount(nextTyres);
+    const schema = fitmentSchema(v, nextTyres);
     const next = {};
-    getFitmentOptions(v).forEach((o) => (next[o] = false));
+    schema.labels.forEach(l => (next[l] = false));
+    setFit(next);
+  }
+  function onTyreCountChange(n) {
+    setTyreCount(n);
+    const schema = fitmentSchema(vehicleType, n);
+    const next = {};
+    schema.labels.forEach(l => (next[l] = false));
     setFit(next);
   }
 
@@ -678,9 +612,9 @@ export default function App() {
         headers: {
           "Content-Type": "application/json",
           "x-api-key": API_KEY,
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payload)
       });
       if (res.status === 401) {
         localStorage.removeItem("maxtt_token");
@@ -689,10 +623,7 @@ export default function App() {
         return null;
       }
       const data = await res.json();
-      if (!res.ok) {
-        alert("Save failed: " + (data?.error || "unknown_error"));
-        return null;
-      }
+      if (!res.ok) { alert("Save failed: " + (data?.error || "unknown_error")); return null; }
       window.dispatchEvent(new Event("invoices-updated"));
       return data;
     } catch {
@@ -702,31 +633,17 @@ export default function App() {
   }
 
   const handleCalculateAndSave = async () => {
-    if (Number(treadDepth || 0) < 1.5) {
-      alert("Installation blocked: Tread depth below 1.5mm.");
-      return;
-    }
+    if (Number(treadDepth || 0) < 1.5) { alert("Installation blocked: Tread depth below 1.5mm."); return; }
     const tCount = parseInt(tyreCount || "0", 10);
-    if (!tCount || tCount < 1) {
-      alert("Please select number of tyres.");
-      return;
-    }
+    if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
 
-    const perTyre = computePerTyreDosageMl(
-      vehicleType,
-      tyreWidth,
-      aspectRatio,
-      rimDiameter
-    );
+    const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const totalMl = perTyre * tCount;
 
     setDosagePerTyre(perTyre);
     setDosageTotal(totalMl);
 
-    if (!customerName || !vehicleNumber) {
-      alert("Please fill Customer Name and Vehicle Number to save invoice.");
-      return;
-    }
+    if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number to save invoice."); return; }
 
     const saved = await saveInvoiceToServer({
       customer_name: customerName,
@@ -740,29 +657,24 @@ export default function App() {
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
       dosage_ml: Number(totalMl),
-      gps_lat: null,
-      gps_lng: null,
-      customer_code: null,
+      gps_lat: null, gps_lng: null, customer_code: null,
       tyre_count: tCount,
-      fitment_locations: textFromFitmentState(fit) || null,
+      fitment_locations: textFromFitState(fit) || null,
       customer_gstin: gstin || null,
-      customer_address: address || null,
+      customer_address: address || null
     });
 
     if (saved?.id) {
       alert(`Invoice saved. ID: ${saved.id}`);
-      const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((r) => r.json())
-        .catch(() => null);
+      const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json()).catch(() => null);
       if (inv) generateInvoicePDF(inv, profile);
     }
   };
 
   if (!token) return <LoginView onLoggedIn={setToken} />;
 
-  const fitOptions = getFitmentOptions(vehicleType);
+  const schema = fitmentSchema(vehicleType, tyreCount);
 
   return (
     <div style={{ maxWidth: 1220, margin: "20px auto", padding: 10 }}>
@@ -795,7 +707,7 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
           <div>
             <label style={{ marginRight: 8 }}>Vehicle Category</label>
-            <select value={vehicleType} onChange={e => { onVehicleTypeChange(e.target.value); }}>
+            <select value={vehicleType} onChange={e => onVehicleTypeChange(e.target.value)}>
               <option>2-Wheeler (Scooter/Motorcycle)</option>
               <option>3-Wheeler (Auto)</option>
               <option>4-Wheeler (Passenger Car/Van/SUV)</option>
@@ -805,7 +717,7 @@ export default function App() {
           </div>
           <div>
             <label style={{ marginRight: 8 }}>Number of Tyres</label>
-            <select value={tyreCount} onChange={e => setTyreCount(e.target.value)}>
+            <select value={tyreCount} onChange={e => onTyreCountChange(e.target.value)}>
               {(VEHICLE_CFG[vehicleType]?.options || [4]).map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           </div>
@@ -824,12 +736,12 @@ export default function App() {
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ marginBottom: 6 }}><strong>Fitment Location:</strong></div>
-          {fitOptions.map((label) => (
+          {schema.labels.map(label => (
             <label key={label} style={{ marginRight: 12 }}>
               <input
                 type="checkbox"
                 checked={!!fit[label]}
-                onChange={(e) => setFit((prev) => ({ ...prev, [label]: e.target.checked }))}
+                onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))}
               />{" "}
               {label}
             </label>
@@ -850,20 +762,11 @@ export default function App() {
       </div>
 
       {/* Invoices list, filters, export, summary, details */}
-      <RecentInvoices
-        token={token}
-        profile={profile}
-        onOpenDetails={(id) => setShowDetailsId(id)}
-      />
+      <RecentInvoices token={token} profile={profile} onOpenDetails={(id) => setShowDetailsId(id)} />
 
       {showDetailsId && (
-        <DetailsModal
-          token={token}
-          invoiceId={showDetailsId}
-          profile={profile}
-          onClose={() => setShowDetailsId(null)}
-          onEdited={() => {}}
-        />
+        <DetailsModal token={token} invoiceId={showDetailsId} profile={profile}
+          onClose={() => setShowDetailsId(null)} onEdited={() => {}} />
       )}
     </div>
   );
