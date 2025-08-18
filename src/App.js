@@ -4,7 +4,7 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com";
-const API_KEY = "REPLACE_WITH_YOUR_API_KEY";
+const API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // <-- set this to your backend API_KEY
 
 // INR formatting
 function inr(num) {
@@ -23,7 +23,6 @@ const VEHICLE_CFG = {
   "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
   "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.03, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
-  "4-Wheeler (Passenger car/van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   "6-Wheeler (Bus/LTV)":            { k: 3.00, bufferPct: 0.05, defaultTyres: 6, options: [6] },
   "HTV (>6 wheels: Trucks/Trailers/Mining)": {
     k: 3.00, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18]
@@ -35,7 +34,6 @@ const TREAD_MIN_MM = {
   "2-Wheeler (Scooter/Motorcycle)": 1.5,
   "3-Wheeler (Auto)": 1.5,
   "4-Wheeler (Passenger Car/Van/SUV)": 1.5,
-  "4-Wheeler (Passenger car/van/SUV)": 1.5,
   "6-Wheeler (Bus/LTV)": 1.5,
   "HTV (>6 wheels: Trucks/Trailers/Mining)": 1.5
 };
@@ -73,7 +71,7 @@ function fitmentSchema(vehicleType, tyreCount) {
 const textFromFitState = (stateObj) =>
   Object.entries(stateObj).filter(([, v]) => !!v).map(([k]) => k).join(", ");
 
-// --------- PDF (signature + final T&C) ----------
+// --------- PDF (signature + frozen texts) ----------
 function generateInvoicePDF(inv, profile) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -169,17 +167,31 @@ function generateInvoicePDF(inv, profile) {
   }
   yAfter += 70;
 
-  // Final T&C (numbered, frozen)
+  // Final Declaration (printed above signature in invoice)
   doc.setFontSize(10);
-  const lines = [
-    "Terms & Conditions",
-    "1. MaxTT tyre sealant is designed to reduce puncture and blowout risks, and to virtually eliminate tyre-related breakdowns when tyres are used within prescribed speed limits of traffic and transport authorities. It does not claim absolute elimination of such risks.",
-    "2. Treadstone Solutions and its authorized franchisees/installers apply the sealant in good faith, based on tyre specifications provided at the time of installation.",
-    "3. Installation is carried out only upon the customer’s request and consent. By signing/accepting this invoice, the customer confirms awareness of the product’s preventive purpose, agrees that installation has been duly completed, and accepts full liability to pay the invoice amount in full.",
-    "4. Post-installation, the customer is deemed to have inspected the service and product fitment and acknowledged satisfactory completion."
+  const decl = [
+    "Customer Declaration",
+    "1. I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
+    "2. I have read, understood, and accepted the Terms & Conditions stated herein.",
+    "3. I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions."
   ];
   const maxWidth = pageWidth - margin * 2;
-  lines.forEach((p, idx) => {
+  decl.forEach((p, idx) => {
+    const wrapped = doc.splitTextToSize(p, maxWidth);
+    if (idx === 0) { doc.setFontSize(11); doc.setFont(undefined, "bold"); }
+    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 14; });
+    if (idx === 0) { doc.setFont(undefined, "normal"); doc.setFontSize(10); }
+    yAfter += 4;
+  });
+
+  // Footer T&C (frozen, always printed)
+  const footer = [
+    "Terms & Conditions",
+    "1. The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
+    "2. Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
+    "3. By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions."
+  ];
+  footer.forEach((p, idx) => {
     const wrapped = doc.splitTextToSize(p, maxWidth);
     if (idx === 0) { doc.setFontSize(11); doc.setFont(undefined, "bold"); }
     wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 14; });
@@ -190,33 +202,46 @@ function generateInvoicePDF(inv, profile) {
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
 
-// -------- Login --------
+// -------- Login (multi-role) --------
 function LoginView({ onLoggedIn }) {
-  const [fid, setFid] = useState("");
-  const [fpw, setFpw] = useState("");
+  const [role, setRole] = useState("franchisee"); // franchisee | admin | super_admin
+  const [id, setId] = useState("");
+  const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
 
   async function doLogin() {
     setErr("");
+    const path =
+      role === "admin" ? "/api/admin/login" :
+      role === "super_admin" ? "/api/sa/login" :
+      "/api/login";
     try {
-      const res = await fetch(`${API_URL}/api/login`, {
+      const res = await fetch(`${API_URL}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: fid, password: fpw })
+        body: JSON.stringify({ id, password: pw })
       });
       const data = await res.json();
-      if (!res.ok) { setErr(data?.error === "invalid_credentials" ? "Invalid ID or password" : "Login failed"); return; }
+      if (!res.ok) { setErr(data?.error === "invalid_credentials" ? "Invalid credentials" : "Login failed"); return; }
       localStorage.setItem("maxtt_token", data.token);
-      onLoggedIn(data.token);
-    } catch { setErr("Network error"); }
+      localStorage.setItem("maxtt_role", role);
+      onLoggedIn({ token: data.token, role });
+    } catch {
+      setErr("Network error");
+    }
   }
 
   return (
-    <div style={{ maxWidth: 420, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
-      <h2 style={{ marginTop: 0 }}>Franchisee Login</h2>
+    <div style={{ maxWidth: 480, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
+      <h2 style={{ marginTop: 0 }}>Login</h2>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <label><input type="radio" name="role" checked={role==="franchisee"} onChange={()=>setRole("franchisee")} /> Franchisee</label>
+        <label><input type="radio" name="role" checked={role==="admin"} onChange={()=>setRole("admin")} /> Admin</label>
+        <label><input type="radio" name="role" checked={role==="super_admin"} onChange={()=>setRole("super_admin")} /> Super Admin</label>
+      </div>
       <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
-        <input placeholder="Franchisee ID" value={fid} onChange={e => setFid(e.target.value)} />
-        <input placeholder="Password" type="password" value={fpw} onChange={e => setFpw(e.target.value)} />
+        <input placeholder={`${role === "franchisee" ? "Franchisee" : role === "admin" ? "Admin" : "Super Admin"} ID`} value={id} onChange={e => setId(e.target.value)} />
+        <input placeholder="Password" type="password" value={pw} onChange={e => setPw(e.target.value)} />
         {err && <div style={{ color: "crimson" }}>{err}</div>}
         <button onClick={doLogin}>Login</button>
       </div>
@@ -225,7 +250,7 @@ function LoginView({ onLoggedIn }) {
 }
 
 // ------- Signature Pad (pure Canvas) -------
-function SignaturePad({ open, onClose, onSave }) {
+function SignaturePad({ open, onClose, onSave, title = "Customer Signature" }) {
   const canvasRef = useRef(null);
   const [drawing, setDrawing] = useState(false);
 
@@ -248,7 +273,7 @@ function SignaturePad({ open, onClose, onSave }) {
       return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
     }
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    };
+  };
 
   const start = (e) => { setDrawing(true); const { x, y } = getPos(e); const ctx = canvasRef.current.getContext("2d"); ctx.beginPath(); ctx.moveTo(x, y); };
   const move  = (e) => { if (!drawing) return; const { x, y } = getPos(e); const ctx = canvasRef.current.getContext("2d"); ctx.lineTo(x, y); ctx.stroke(); };
@@ -269,10 +294,7 @@ function SignaturePad({ open, onClose, onSave }) {
   return (
     <div style={modalWrap}>
       <div style={{ ...modalBox, maxWidth: 740 }}>
-        <h3 style={{ marginTop: 0 }}>Customer Signature</h3>
-        <div style={{ fontSize: 13, color: "#666", marginBottom: 6 }}>
-          Please capture the customer’s signature **before** installation proceeds.
-        </div>
+        <h3 style={{ marginTop: 0 }}>{title}</h3>
         <div style={{ border: "1px solid #ccc", borderRadius: 6, background: "#fff", touchAction: "none" }}>
           <canvas
             ref={canvasRef}
@@ -297,7 +319,7 @@ function SignaturePad({ open, onClose, onSave }) {
   );
 }
 
-// -------- Invoices list (unchanged logic) --------
+// -------- Invoices list (used by franchisee/admin) --------
 function RecentInvoices({ token, profile, onOpenDetails }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -415,7 +437,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
   );
 }
 
-// ------- Details modal (unchanged except we show signature info in PDF) -------
+// ------- Details modal (view/edit) -------
 function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
   const [inv, setInv] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -543,7 +565,6 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
-            {/* edit fields… (kept same as earlier for brevity) */}
             <input placeholder="Customer Name" value={form.customer_name}
                    onChange={e => setForm(f => ({...f, customer_name: e.target.value}))} />
             <input placeholder="Mobile Number" value={form.mobile_number}
@@ -605,29 +626,15 @@ const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", 
                     alignItems: "center", justifyContent: "center", padding: 16 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
-// -------- Main App (with signature step required) --------
-export default function App() {
-  const [token, setToken] = useState(() => localStorage.getItem("maxtt_token") || "");
+// -------- Franchisee App (create invoice with signature gate) --------
+function FranchiseeApp({ token, onLogout }) {
   const [profile, setProfile] = useState(null);
-  const [showDetailsId, setShowDetailsId] = useState(null);
 
   // Signature modal
   const [sigOpen, setSigOpen] = useState(false);
-  const [signatureData, setSignatureData] = useState(""); // base64 PNG
+  const [signatureData, setSignatureData] = useState(""); // base64 PNG (final invoice signature)
 
-  // Profile
-  useEffect(() => {
-    if (!token) return;
-    fetch(`${API_URL}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => {
-        if (r.status === 401) { localStorage.removeItem("maxtt_token"); window.location.reload(); return null; }
-        return r.json();
-      })
-      .then(setProfile)
-      .catch(() => setProfile(null));
-  }, [token]);
-
-  // Create form
+  // Form
   const [customerName, setCustomerName] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
@@ -641,16 +648,22 @@ export default function App() {
   const [rimDiameter, setRimDiameter] = useState("");
   const [tyreCount, setTyreCount] = useState(4);
 
-  const [dosagePerTyre, setDosagePerTyre] = useState(null);
-  const [dosageTotal, setDosageTotal] = useState(null);
-
   const [gstin, setGstin] = useState("");
   const [address, setAddress] = useState("");
-
   const [fit, setFit] = useState(() => {
     const init = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
     return init;
   });
+
+  useEffect(() => {
+    fetch(`${API_URL}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => {
+        if (r.status === 401) { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); window.location.reload(); return null; }
+        return r.json();
+      })
+      .then(setProfile)
+      .catch(() => setProfile(null));
+  }, [token]);
 
   function onVehicleTypeChange(v) {
     setVehicleType(v);
@@ -677,7 +690,7 @@ export default function App() {
         },
         body: JSON.stringify(payload)
       });
-      if (res.status === 401) { localStorage.removeItem("maxtt_token"); alert("Session expired. Please log in again."); window.location.reload(); return null; }
+      if (res.status === 401) { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); alert("Session expired. Please log in again."); window.location.reload(); return null; }
       const data = await res.json();
       if (!res.ok) { alert("Save failed: " + (data?.error || "unknown_error")); return null; }
       window.dispatchEvent(new Event("invoices-updated"));
@@ -685,13 +698,12 @@ export default function App() {
     } catch { alert("Network error while saving invoice"); return null; }
   }
 
-  // Require signature BEFORE saving
   const handleCalculateAndSave = async () => {
     const minTd = minTreadFor(vehicleType);
     if (Number(treadDepth || 0) < minTd) { alert(`Installation blocked: Tread depth below ${minTd} mm for this category.`); return; }
     if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number."); return; }
 
-    // If no signature yet, open pad and stop here
+    // Require signature BEFORE saving
     if (!signatureData) { setSigOpen(true); return; }
 
     const tCount = parseInt(tyreCount || "0", 10);
@@ -699,9 +711,16 @@ export default function App() {
 
     const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const totalMl = perTyre * tCount;
-    setDosagePerTyre(perTyre); setDosageTotal(totalMl);
 
     const nowIso = new Date().toISOString();
+
+    // consent text snapshot (midway) – kept short per our legal design
+    const consentSnapshot =
+      "Customer Consent to Proceed: Informed of process, pricing and GST; consents to installation and undertakes to pay upon completion.";
+
+    // declaration snapshot (printed on invoice)
+    const declarationSnapshot =
+      "Final Declaration: Installation completed to satisfaction; accepts T&C; acknowledges total amount payable.";
 
     const saved = await saveInvoiceToServer({
       customer_name: customerName,
@@ -717,10 +736,20 @@ export default function App() {
       tyre_count: tCount,
       fitment_locations: textFromFitState(fit) || null,
       dosage_ml: Number(totalMl),
+
       customer_gstin: gstin || null,
       customer_address: address || null,
-      customer_signature: signatureData,  // base64 image
+
+      // Mid-way consent (using same signature for now; can split later if needed)
+      consent_signature: signatureData,
+      consent_signed_at: nowIso,
+      consent_snapshot: consentSnapshot,
+
+      // Final declaration + signature (same signature captured here)
+      customer_signature: signatureData,
       signed_at: nowIso,
+      declaration_snapshot: declarationSnapshot,
+
       gps_lat: null, gps_lng: null, customer_code: null
     });
 
@@ -734,15 +763,13 @@ export default function App() {
     }
   };
 
-  if (!token) return <LoginView onLoggedIn={setToken} />;
-
   const schema = fitmentSchema(vehicleType, tyreCount);
 
   return (
     <div style={{ maxWidth: 1220, margin: "20px auto", padding: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h1>MaxTT Billing & Dosage Calculator</h1>
-        <button onClick={() => { localStorage.removeItem("maxtt_token"); setToken(""); }}>Logout</button>
+        <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
       </div>
 
       {profile && (
@@ -804,7 +831,7 @@ export default function App() {
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ marginBottom: 6 }}><strong>Fitment Location:</strong></div>
-          {schema.labels.map(label => (
+          {fitmentSchema(vehicleType, tyreCount).labels.map(label => (
             <label key={label} style={{ marginRight: 12 }}>
               <input type="checkbox" checked={!!fit[label]}
                      onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))} /> {label}
@@ -824,13 +851,7 @@ export default function App() {
       </div>
 
       {/* Recent Invoices table */}
-      <RecentInvoices token={token} profile={profile} onOpenDetails={(id) => setShowDetailsId(id)} />
-
-      {/* Details modal */}
-      {showDetailsId && (
-        <DetailsModal token={token} invoiceId={showDetailsId} profile={profile}
-          onClose={() => setShowDetailsId(null)} onEdited={() => {}} />
-      )}
+      <RecentInvoices token={token} profile={profile} onOpenDetails={(id) => { /* optional details */ }} />
 
       {/* Signature modal */}
       <SignaturePad
@@ -840,4 +861,186 @@ export default function App() {
       />
     </div>
   );
+}
+
+// -------- Admin App (tickets & evidence) --------
+function AdminApp({ token, onLogout }) {
+  const [profile, setProfile] = useState(null);
+  useEffect(() => {
+    fetch(`${API_URL}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(setProfile).catch(()=>{});
+  }, [token]);
+
+  const [invoiceIdForTicket, setInvoiceIdForTicket] = useState("");
+  const [reason, setReason] = useState("");
+  const [ticketCreated, setTicketCreated] = useState(null);
+
+  const [ticketIdForEvidence, setTicketIdForEvidence] = useState("");
+  const [evidence, setEvidence] = useState(null);
+
+  async function createTicket() {
+    try {
+      const res = await fetch(`${API_URL}/api/tickets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ invoice_id: Number(invoiceIdForTicket), reason })
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data?.error || "Could not create ticket"); return; }
+      setTicketCreated(data);
+      alert(`Ticket created. ID: ${data.id}`);
+    } catch { alert("Network error"); }
+  }
+
+  async function fetchEvidence() {
+    try {
+      const res = await fetch(`${API_URL}/api/tickets/${ticketIdForEvidence}/evidence`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data?.error || "Could not fetch evidence"); return; }
+      setEvidence(data);
+    } catch { alert("Network error"); }
+  }
+
+  return (
+    <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <h1>Admin Console</h1>
+        <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+      </div>
+
+      <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10 }}>
+        Logged in as <strong>Admin</strong>
+      </div>
+
+      {/* Browse invoices */}
+      <RecentInvoices token={token} profile={null} onOpenDetails={()=>{}} />
+
+      {/* Raise Dispute Ticket */}
+      <div style={{ border: "1px solid #eee", padding: 10, borderRadius: 8, marginTop: 16 }}>
+        <h3>Raise Dispute Ticket</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr auto", gap: 8 }}>
+          <input placeholder="Invoice ID" value={invoiceIdForTicket} onChange={e=>setInvoiceIdForTicket(e.target.value)} />
+          <input placeholder="Reason (e.g., Customer refused payment)" value={reason} onChange={e=>setReason(e.target.value)} />
+          <button onClick={createTicket}>Create Ticket</button>
+        </div>
+        {ticketCreated && <div style={{ marginTop: 8, color: "green" }}>Ticket #{ticketCreated.id} created. Status: {ticketCreated.status}</div>}
+      </div>
+
+      {/* Evidence (after SA approval) */}
+      <div style={{ border: "1px solid #eee", padding: 10, borderRadius: 8, marginTop: 16 }}>
+        <h3>Fetch Evidence Pack (after approval)</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+          <input placeholder="Ticket ID" value={ticketIdForEvidence} onChange={e=>setTicketIdForEvidence(e.target.value)} />
+          <button onClick={fetchEvidence}>Fetch Evidence</button>
+        </div>
+        {evidence && (
+          <pre style={{ background: "#fafafa", padding: 8, borderRadius: 6, marginTop: 10, maxHeight: 280, overflow: "auto" }}>
+            {JSON.stringify(evidence, null, 2)}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// -------- Super Admin App (approve & evidence) --------
+function SuperAdminApp({ token, onLogout }) {
+  const [ticketId, setTicketId] = useState("");
+  const [approveResult, setApproveResult] = useState(null);
+
+  const [evidenceTicketId, setEvidenceTicketId] = useState("");
+  const [ticketEvidence, setTicketEvidence] = useState(null);
+
+  const [invoiceEvidenceId, setInvoiceEvidenceId] = useState("");
+  const [invoiceEvidence, setInvoiceEvidence] = useState(null);
+
+  async function approveTicket() {
+    try {
+      const res = await fetch(`${API_URL}/api/tickets/${ticketId}/approve`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data?.error || "Approve failed"); return; }
+      setApproveResult(data);
+      alert("Ticket approved.");
+    } catch { alert("Network error"); }
+  }
+
+  async function fetchTicketEvidence() {
+    try {
+      const res = await fetch(`${API_URL}/api/tickets/${evidenceTicketId}/evidence`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data?.error || "Could not fetch evidence"); return; }
+      setTicketEvidence(data);
+    } catch { alert("Network error"); }
+  }
+
+  async function fetchInvoiceEvidence() {
+    try {
+      const res = await fetch(`${API_URL}/api/invoices/${invoiceEvidenceId}/evidence`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data?.error || "Could not fetch invoice evidence"); return; }
+      setInvoiceEvidence(data);
+    } catch { alert("Network error"); }
+  }
+
+  return (
+    <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <h1>Super Admin Console</h1>
+        <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+      </div>
+
+      <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10 }}>
+        Logged in as <strong>Super Admin</strong>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, border: "1px solid #eee", padding: 10, borderRadius: 8 }}>
+        <input placeholder="Ticket ID to approve" value={ticketId} onChange={e=>setTicketId(e.target.value)} />
+        <button onClick={approveTicket}>Approve Ticket</button>
+      </div>
+      {approveResult && <pre style={{ background: "#fafafa", padding: 8, borderRadius: 6, marginTop: 10 }}>{JSON.stringify(approveResult, null, 2)}</pre>}
+
+      <div style={{ border: "1px solid #eee", padding: 10, borderRadius: 8, marginTop: 16 }}>
+        <h3>Fetch Evidence by Ticket</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+          <input placeholder="Ticket ID" value={evidenceTicketId} onChange={e=>setEvidenceTicketId(e.target.value)} />
+          <button onClick={fetchTicketEvidence}>Fetch Evidence</button>
+        </div>
+        {ticketEvidence && <pre style={{ background: "#fafafa", padding: 8, borderRadius: 6, marginTop: 10 }}>{JSON.stringify(ticketEvidence, null, 2)}</pre>}
+      </div>
+
+      <div style={{ border: "1px solid #eee", padding: 10, borderRadius: 8, marginTop: 16 }}>
+        <h3>Fetch Evidence by Invoice (Direct)</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+          <input placeholder="Invoice ID" value={invoiceEvidenceId} onChange={e=>setInvoiceEvidenceId(e.target.value)} />
+          <button onClick={fetchInvoiceEvidence}>Fetch Invoice Evidence</button>
+        </div>
+        {invoiceEvidence && <pre style={{ background: "#fafafa", padding: 8, borderRadius: 6, marginTop: 10 }}>{JSON.stringify(invoiceEvidence, null, 2)}</pre>}
+      </div>
+    </div>
+  );
+}
+
+// -------- Root App --------
+export default function App() {
+  const [auth, setAuth] = useState(() => {
+    const token = localStorage.getItem("maxtt_token") || "";
+    const role = localStorage.getItem("maxtt_role") || "";
+    return token ? { token, role } : null;
+  });
+
+  if (!auth) return <LoginView onLoggedIn={setAuth} />;
+
+  if (auth.role === "admin")   return <AdminApp token={auth.token} onLogout={() => setAuth(null)} />;
+  if (auth.role === "super_admin") return <SuperAdminApp token={auth.token} onLogout={() => setAuth(null)} />;
+  // default: franchisee
+  return <FranchiseeApp token={auth.token} onLogout={() => setAuth(null)} />;
 }
