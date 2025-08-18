@@ -21,13 +21,30 @@ function inr(num) {
 // ---------- Vehicle categories ----------
 const VEHICLE_CFG = {
   "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
-  "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.00, defaultTyres: 3, options: [3] },
+  "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.03, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   // Back-compat (old lowercase “car/van” rows may exist)
   "4-Wheeler (Passenger car/van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
-  "6-Wheeler (Bus/LTV)":            { k: 3.00, bufferPct: 0.00, defaultTyres: 6, options: [6] },
-  "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.00, bufferPct: 0.00, defaultTyres: 8, options: [8,10,12,14,16] }
+  "6-Wheeler (Bus/LTV)":            { k: 3.00, bufferPct: 0.05, defaultTyres: 6, options: [6] },
+  "HTV (>6 wheels: Trucks/Trailers/Mining)": {
+    k: 3.00, bufferPct: 0.05, defaultTyres: 8,
+    options: [8, 10, 12, 14, 16, 18] // ← extended up to 18
+  }
 };
+
+// ---------- Minimum tread depth per category (mm) ----------
+// Default is 1.5 mm for all. Adjust per category here if required later.
+const TREAD_MIN_MM = {
+  "2-Wheeler (Scooter/Motorcycle)": 1.5,
+  "3-Wheeler (Auto)": 1.5,
+  "4-Wheeler (Passenger Car/Van/SUV)": 1.5,
+  "4-Wheeler (Passenger car/van/SUV)": 1.5,
+  "6-Wheeler (Bus/LTV)": 1.5,
+  "HTV (>6 wheels: Trucks/Trailers/Mining)": 1.5
+};
+function minTreadFor(vtype) {
+  return TREAD_MIN_MM[vtype] ?? 1.5;
+}
 
 function roundTo25(x) { return Math.round(x / 25) * 25; }
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
@@ -52,7 +69,6 @@ function fitmentSchema(vehicleType, tyreCount) {
   }
   // 6-Wheeler and HTV: grouped rear by side
   const t = Number(tyreCount || 0);
-  // two fronts assumed possible, the rest split evenly by side
   const rearEach = Math.max(2, Math.floor((t - 2) / 2));
   return {
     mode: "grouped",
@@ -72,7 +88,7 @@ function textFromFitState(stateObj) {
     .join(", ");
 }
 
-// ---------- PDF ----------
+// ---------- PDF (includes numbered T&C block) ----------
 function generateInvoicePDF(inv, profile) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -153,9 +169,24 @@ function generateInvoicePDF(inv, profile) {
     headStyles: { fillColor: [60, 60, 60] }
   });
 
+  // --- Classy numbered T&C block at bottom ---
   const yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 24 : 500;
   doc.setFontSize(10);
-  doc.text("This invoice is system-generated. Pricing and GST are computed per configured rates.", margin, yAfter);
+  const lines = [
+    "1) The MaxTT Tyre Sealant is designed to reduce the risk of punctures and blowouts to virtually eliminate such occurrences when tyres are maintained and operated under normal conditions.",
+    "2) Performance is valid only when vehicles are used within the prescribed legal speed limits under applicable traffic and transport laws.",
+    "3) The customer has been informed of the product’s scope of protection and operational conditions at the time of installation and has consented to the application with full knowledge of the same.",
+    "4) Treadstone Solutions, its franchisees, installers, and channel partners shall not be liable for any accident, damage, or loss arising from misuse, poor tyre maintenance, or operation of the vehicle beyond prescribed limits.",
+    "5) All disputes are subject to the exclusive jurisdiction of the courts at Gurgaon, Haryana (India)."
+  ];
+  // Render as justified-style paragraphs (simulate by splitting into lineWidth):
+  const maxWidth = pageWidth - margin * 2;
+  let yPos = yAfter;
+  lines.forEach((p) => {
+    const wrapped = doc.splitTextToSize(p, maxWidth);
+    wrapped.forEach((ln) => { doc.text(ln, margin, yPos); yPos += 14; });
+    yPos += 4;
+  });
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
@@ -633,7 +664,11 @@ export default function App() {
   }
 
   const handleCalculateAndSave = async () => {
-    if (Number(treadDepth || 0) < 1.5) { alert("Installation blocked: Tread depth below 1.5mm."); return; }
+    const minTd = minTreadFor(vehicleType);
+    if (Number(treadDepth || 0) < minTd) {
+      alert(`Installation blocked: Tread depth below ${minTd} mm for this category.`);
+      return;
+    }
     const tCount = parseInt(tyreCount || "0", 10);
     if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
 
@@ -643,7 +678,10 @@ export default function App() {
     setDosagePerTyre(perTyre);
     setDosageTotal(totalMl);
 
-    if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number to save invoice."); return; }
+    if (!customerName || !vehicleNumber) {
+      alert("Please fill Customer Name and Vehicle Number to save invoice.");
+      return;
+    }
 
     const saved = await saveInvoiceToServer({
       customer_name: customerName,
@@ -683,6 +721,7 @@ export default function App() {
         <button onClick={() => { localStorage.removeItem("maxtt_token"); setToken(""); }}>Logout</button>
       </div>
 
+      {/* Franchisee header */}
       {profile && (
         <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13 }}>
           <strong>Franchisee:</strong> {profile.name} &nbsp;|&nbsp;
@@ -695,12 +734,18 @@ export default function App() {
       {/* Create Invoice */}
       <div style={{ border: "1px solid #eee", padding: 10, borderRadius: 8 }}>
         <h3 style={{ marginTop: 0 }}>Create New Invoice</h3>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
           <input placeholder="Customer Name" value={customerName} onChange={e => setCustomerName(e.target.value)} />
           <input placeholder="Vehicle Number" value={vehicleNumber} onChange={e => setVehicleNumber(e.target.value)} />
           <input placeholder="Mobile Number" value={mobileNumber} onChange={e => setMobileNumber(e.target.value)} />
           <input placeholder="Odometer Reading" value={odometer} onChange={e => setOdometer(e.target.value)} />
-          <input placeholder="Tread Depth (mm)" value={treadDepth} onChange={e => setTreadDepth(e.target.value)} />
+          <div>
+            <input placeholder="Tread Depth (mm)" value={treadDepth} onChange={e => setTreadDepth(e.target.value)} />
+            <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>
+              Minimum for this category: <strong>{minTreadFor(vehicleType)} mm</strong>
+            </div>
+          </div>
           <input placeholder="Installer Name" value={installerName} onChange={e => setInstallerName(e.target.value)} />
         </div>
 
