@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useCallback } from "react";
+// src/App.js
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com";
-// 🔐 MUST match Render API env var API_KEY
 const API_KEY = "REPLACE_WITH_YOUR_API_KEY";
 
-// ---------- INR (ASCII-safe) ----------
+// INR formatting
 function inr(num) {
   const n = Math.round((Number(num) || 0) * 100) / 100;
   const [intPartRaw, dec = "00"] = n.toFixed(2).split(".");
@@ -18,22 +18,19 @@ function inr(num) {
   return `Rs. ${withCommas}.${dec}`;
 }
 
-// ---------- Vehicle categories ----------
+// Vehicle config (k, buffer, tyres)
 const VEHICLE_CFG = {
   "2-Wheeler (Scooter/Motorcycle)": { k: 2.60, bufferPct: 0.03, defaultTyres: 2, options: [2] },
   "3-Wheeler (Auto)":               { k: 2.20, bufferPct: 0.03, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
-  // Back-compat (old lowercase “car/van” rows may exist)
   "4-Wheeler (Passenger car/van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   "6-Wheeler (Bus/LTV)":            { k: 3.00, bufferPct: 0.05, defaultTyres: 6, options: [6] },
   "HTV (>6 wheels: Trucks/Trailers/Mining)": {
-    k: 3.00, bufferPct: 0.05, defaultTyres: 8,
-    options: [8, 10, 12, 14, 16, 18] // ← extended up to 18
+    k: 3.00, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18]
   }
 };
 
-// ---------- Minimum tread depth per category (mm) ----------
-// Default is 1.5 mm for all. Adjust per category here if required later.
+// Per-category min tread (mm)
 const TREAD_MIN_MM = {
   "2-Wheeler (Scooter/Motorcycle)": 1.5,
   "3-Wheeler (Auto)": 1.5,
@@ -42,11 +39,9 @@ const TREAD_MIN_MM = {
   "6-Wheeler (Bus/LTV)": 1.5,
   "HTV (>6 wheels: Trucks/Trailers/Mining)": 1.5
 };
-function minTreadFor(vtype) {
-  return TREAD_MIN_MM[vtype] ?? 1.5;
-}
+const minTreadFor = (v) => TREAD_MIN_MM[v] ?? 1.5;
 
-function roundTo25(x) { return Math.round(x / 25) * 25; }
+const roundTo25 = (x) => Math.round(x / 25) * 25;
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
   const widthIn = Number(widthMm || 0) * 0.03937;
@@ -56,7 +51,7 @@ function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   return roundTo25(dosage);
 }
 
-// ---------- Fitment schema (list for ≤4 wheels, grouped for ≥6) ----------
+// Fitment schema
 function fitmentSchema(vehicleType, tyreCount) {
   if (vehicleType === "2-Wheeler (Scooter/Motorcycle)") {
     return { mode: "list", labels: ["Front", "Rear"] };
@@ -67,28 +62,18 @@ function fitmentSchema(vehicleType, tyreCount) {
   if (vehicleType.startsWith("4-Wheeler")) {
     return { mode: "list", labels: ["Front Left", "Front Right", "Rear Left", "Rear Right"] };
   }
-  // 6-Wheeler and HTV: grouped rear by side
   const t = Number(tyreCount || 0);
   const rearEach = Math.max(2, Math.floor((t - 2) / 2));
   return {
     mode: "grouped",
-    labels: [
-      "Front Left",
-      "Front Right",
-      `Rear Left ×${rearEach}`,
-      `Rear Right ×${rearEach}`
-    ],
+    labels: ["Front Left", "Front Right", `Rear Left ×${rearEach}`, `Rear Right ×${rearEach}`],
     rearEach
   };
 }
-function textFromFitState(stateObj) {
-  return Object.entries(stateObj)
-    .filter(([, v]) => !!v)
-    .map(([k]) => k)
-    .join(", ");
-}
+const textFromFitState = (stateObj) =>
+  Object.entries(stateObj).filter(([, v]) => !!v).map(([k]) => k).join(", ");
 
-// ---------- PDF (includes numbered T&C block) ----------
+// --------- PDF (signature + final T&C) ----------
 function generateInvoicePDF(inv, profile) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -115,7 +100,7 @@ function generateInvoicePDF(inv, profile) {
   doc.saveGraphicsState && doc.saveGraphicsState();
   doc.setFontSize(56);
   doc.setTextColor(210);
-  doc.text("MaxTT Billing", pageWidth / 2, 380, { angle: 35, align: "center" });
+  doc.text("MaxTT Billing", pageWidth / 2, 360, { angle: 35, align: "center" });
   doc.setTextColor(0);
   doc.restoreGraphicsState && doc.restoreGraphicsState();
 
@@ -151,10 +136,10 @@ function generateInvoicePDF(inv, profile) {
   ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 18 + i * 16));
 
   // Amounts
-  const price = Number(inv.price_per_ml ?? 0);
   const before = Number(inv.total_before_gst ?? 0);
-  const gst = Number(inv.gst_amount ?? 0);
-  const total = Number(inv.total_with_gst ?? 0);
+  const gst    = Number(inv.gst_amount ?? 0);
+  const total  = Number(inv.total_with_gst ?? 0);
+  const price  = Number(inv.price_per_ml ?? 0);
   doc.autoTable({
     startY: yCustStart + 150,
     head: [["Description", "Value"]],
@@ -169,29 +154,43 @@ function generateInvoicePDF(inv, profile) {
     headStyles: { fillColor: [60, 60, 60] }
   });
 
-  // --- Classy numbered T&C block at bottom ---
-  const yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 24 : 500;
+  // Signature block (if present)
+  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 18 : 480;
+  doc.setFontSize(11);
+  doc.text("Customer Signature:", margin, yAfter);
+  if (inv.customer_signature) {
+    try {
+      doc.addImage(inv.customer_signature, "PNG", margin + 140, yAfter - 14, 140, 50);
+    } catch {}
+  }
+  if (inv.signed_at) {
+    const sdt = new Date(inv.signed_at);
+    doc.text(`Signed at: ${sdt.toLocaleString()}`, margin + 300, yAfter);
+  }
+  yAfter += 70;
+
+  // Final T&C (numbered, frozen)
   doc.setFontSize(10);
   const lines = [
-    "1) The MaxTT Tyre Sealant is designed to reduce the risk of punctures and blowouts to virtually eliminate such occurrences when tyres are maintained and operated under normal conditions.",
-    "2) Performance is valid only when vehicles are used within the prescribed legal speed limits under applicable traffic and transport laws.",
-    "3) The customer has been informed of the product’s scope of protection and operational conditions at the time of installation and has consented to the application with full knowledge of the same.",
-    "4) Treadstone Solutions, its franchisees, installers, and channel partners shall not be liable for any accident, damage, or loss arising from misuse, poor tyre maintenance, or operation of the vehicle beyond prescribed limits.",
-    "5) All disputes are subject to the exclusive jurisdiction of the courts at Gurgaon, Haryana (India)."
+    "Terms & Conditions",
+    "1. MaxTT tyre sealant is designed to reduce puncture and blowout risks, and to virtually eliminate tyre-related breakdowns when tyres are used within prescribed speed limits of traffic and transport authorities. It does not claim absolute elimination of such risks.",
+    "2. Treadstone Solutions and its authorized franchisees/installers apply the sealant in good faith, based on tyre specifications provided at the time of installation.",
+    "3. Installation is carried out only upon the customer’s request and consent. By signing/accepting this invoice, the customer confirms awareness of the product’s preventive purpose, agrees that installation has been duly completed, and accepts full liability to pay the invoice amount in full.",
+    "4. Post-installation, the customer is deemed to have inspected the service and product fitment and acknowledged satisfactory completion."
   ];
-  // Render as justified-style paragraphs (simulate by splitting into lineWidth):
   const maxWidth = pageWidth - margin * 2;
-  let yPos = yAfter;
-  lines.forEach((p) => {
+  lines.forEach((p, idx) => {
     const wrapped = doc.splitTextToSize(p, maxWidth);
-    wrapped.forEach((ln) => { doc.text(ln, margin, yPos); yPos += 14; });
-    yPos += 4;
+    if (idx === 0) { doc.setFontSize(11); doc.setFont(undefined, "bold"); }
+    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 14; });
+    if (idx === 0) { doc.setFont(undefined, "normal"); doc.setFontSize(10); }
+    yAfter += 2;
   });
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
 
-// ---------- Login ----------
+// -------- Login --------
 function LoginView({ onLoggedIn }) {
   const [fid, setFid] = useState("");
   const [fpw, setFpw] = useState("");
@@ -206,15 +205,10 @@ function LoginView({ onLoggedIn }) {
         body: JSON.stringify({ id: fid, password: fpw })
       });
       const data = await res.json();
-      if (!res.ok) {
-        setErr(data?.error === "invalid_credentials" ? "Invalid ID or password" : "Login failed");
-        return;
-      }
+      if (!res.ok) { setErr(data?.error === "invalid_credentials" ? "Invalid ID or password" : "Login failed"); return; }
       localStorage.setItem("maxtt_token", data.token);
       onLoggedIn(data.token);
-    } catch {
-      setErr("Network error");
-    }
+    } catch { setErr("Network error"); }
   }
 
   return (
@@ -230,18 +224,88 @@ function LoginView({ onLoggedIn }) {
   );
 }
 
-// ---------- Invoices list (filters + export + details) ----------
+// ------- Signature Pad (pure Canvas) -------
+function SignaturePad({ open, onClose, onSave }) {
+  const canvasRef = useRef(null);
+  const [drawing, setDrawing] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#111";
+  }, [open]);
+
+  const getPos = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    if (e.touches && e.touches.length) {
+      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+    }
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    };
+
+  const start = (e) => { setDrawing(true); const { x, y } = getPos(e); const ctx = canvasRef.current.getContext("2d"); ctx.beginPath(); ctx.moveTo(x, y); };
+  const move  = (e) => { if (!drawing) return; const { x, y } = getPos(e); const ctx = canvasRef.current.getContext("2d"); ctx.lineTo(x, y); ctx.stroke(); };
+  const end   = () => { setDrawing(false); };
+
+  const clear = () => {
+    const ctx = canvasRef.current.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+  };
+
+  const save = () => {
+    const dataUrl = canvasRef.current.toDataURL("image/png");
+    onSave(dataUrl);
+  };
+
+  if (!open) return null;
+  return (
+    <div style={modalWrap}>
+      <div style={{ ...modalBox, maxWidth: 740 }}>
+        <h3 style={{ marginTop: 0 }}>Customer Signature</h3>
+        <div style={{ fontSize: 13, color: "#666", marginBottom: 6 }}>
+          Please capture the customer’s signature **before** installation proceeds.
+        </div>
+        <div style={{ border: "1px solid #ccc", borderRadius: 6, background: "#fff", touchAction: "none" }}>
+          <canvas
+            ref={canvasRef}
+            width={660}
+            height={220}
+            style={{ width: "100%", height: 220, display: "block", borderRadius: 6 }}
+            onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+            onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+          />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
+          <div>
+            <button onClick={clear} style={{ marginRight: 8 }}>Clear</button>
+          </div>
+          <div>
+            <button onClick={onClose} style={{ marginRight: 8 }}>Cancel</button>
+            <button onClick={save}>Use this Signature</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// -------- Invoices list (unchanged logic) --------
 function RecentInvoices({ token, profile, onOpenDetails }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
-  // filters
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [summary, setSummary] = useState(null);
-
   const headersAuth = { Authorization: `Bearer ${token}` };
 
   const fetchRows = useCallback(() => {
@@ -253,8 +317,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
     params.set("limit", "500");
 
     fetch(`${API_URL}/api/invoices?${params.toString()}`, { headers: headersAuth })
-      .then(r => r.json())
-      .then(data => { setRows(Array.isArray(data) ? data : []); setLoading(false); })
+      .then(r => r.json()).then(data => { setRows(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => { setError("Could not load invoices"); setLoading(false); });
 
     fetch(`${API_URL}/api/summary?${params.toString()}`, { headers: headersAuth })
@@ -279,12 +342,9 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url;
-        a.download = "invoices_export.csv";
-        document.body.appendChild(a);
-        a.click();
-        URL.revokeObjectURL(url);
-        a.remove();
+        a.href = url; a.download = "invoices_export.csv";
+        document.body.appendChild(a); a.click();
+        URL.revokeObjectURL(url); a.remove();
       })
       .catch(() => alert("Export failed"));
   }
@@ -295,8 +355,6 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
   return (
     <div style={{ marginTop: 24 }}>
       <h2>Invoices</h2>
-
-      {/* Filters */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center",
                     marginBottom: 10, border: "1px solid #eee", padding: 8, borderRadius: 6 }}>
         <input placeholder="Search name or vehicle no." value={q} onChange={e => setQ(e.target.value)}
@@ -312,7 +370,6 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
         <button onClick={exportCsv}>Export CSV</button>
       </div>
 
-      {/* Summary */}
       {summary && (
         <div style={{ marginBottom: 10, background: "#f7f7f7", padding: 8, borderRadius: 6 }}>
           <strong>Summary:</strong> &nbsp;
@@ -324,25 +381,14 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
         </div>
       )}
 
-      {/* Table */}
-      {rows.length === 0 ? (
-        <div>No invoices found.</div>
-      ) : (
+      {rows.length === 0 ? <div>No invoices found.</div> : (
         <div style={{ overflowX: "auto" }}>
           <table border="1" cellPadding="6" style={{ minWidth: 1260 }}>
             <thead>
               <tr>
-                <th>ID</th>
-                <th>Date/Time</th>
-                <th>Customer</th>
-                <th>Vehicle</th>
-                <th>Category</th>
-                <th>Tyres</th>
-                <th>Fitment</th>
-                <th>Total Dosage (ml)</th>
-                <th>Total (₹)</th>
-                <th>PDF</th>
-                <th>Details</th>
+                <th>ID</th><th>Date/Time</th><th>Customer</th><th>Vehicle</th>
+                <th>Category</th><th>Tyres</th><th>Fitment</th>
+                <th>Total Dosage (ml)</th><th>Total (₹)</th><th>PDF</th><th>Details</th>
               </tr>
             </thead>
             <tbody>
@@ -369,7 +415,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
   );
 }
 
-// ---------- Details + Edit modal (uses same schema) ----------
+// ------- Details modal (unchanged except we show signature info in PDF) -------
 function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
   const [inv, setInv] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -405,7 +451,9 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
         tyre_count: inv.tyre_count ?? "",
         customer_gstin: inv.customer_gstin || "",
         customer_address: inv.customer_address || "",
-        dosage_ml: inv.dosage_ml ?? ""
+        dosage_ml: inv.dosage_ml ?? "",
+        customer_signature: inv.customer_signature || "",
+        signed_at: inv.signed_at || ""
       });
     }
   }, [inv]);
@@ -413,16 +461,12 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
   function onChangeVehicleType(v) {
     setForm(f => ({ ...f, vehicle_type: v }));
     const schema = fitmentSchema(v, form.tyre_count);
-    const next = {};
-    schema.labels.forEach(l => (next[l] = false));
-    setFit(next);
+    const next = {}; schema.labels.forEach(l => (next[l] = false)); setFit(next);
   }
   function onChangeTyreCount(n) {
     setForm(f => ({ ...f, tyre_count: n }));
     const schema = fitmentSchema(form.vehicle_type, n);
-    const next = {};
-    schema.labels.forEach(l => (next[l] = false));
-    setFit(next);
+    const next = {}; schema.labels.forEach(l => (next[l] = false)); setFit(next);
   }
 
   async function saveEdits() {
@@ -456,9 +500,7 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
       fetch(`${API_URL}/api/invoices/${invoiceId}`, { headers: authHeaders })
         .then(r => r.json()).then(setInv).catch(() => {});
       window.dispatchEvent(new Event("invoices-updated"));
-    } catch {
-      alert("Network error");
-    }
+    } catch { alert("Network error"); }
   }
 
   if (!inv) {
@@ -496,14 +538,12 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
             <div><strong>Tyre Size:</strong> {inv.tyre_width_mm}/{inv.aspect_ratio} R{inv.rim_diameter_in}</div>
             <div><strong>Tread Depth:</strong> {inv.tread_depth_mm} mm</div>
             <div><strong>Fitment:</strong> {inv.fitment_locations || "-"}</div>
-            <div><strong>Customer GSTIN:</strong> {inv.customer_gstin || "-"}</div>
-            <div><strong>Address:</strong> {inv.customer_address || "-"}</div>
             <div><strong>Total Dosage:</strong> {inv.dosage_ml} ml</div>
             <div><strong>Total (with GST):</strong> {inr(inv.total_with_gst)}</div>
-            <div style={{ color: "#888", marginTop: 6 }}>Updated: {new Date(inv.updated_at).toLocaleString()}</div>
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+            {/* edit fields… (kept same as earlier for brevity) */}
             <input placeholder="Customer Name" value={form.customer_name}
                    onChange={e => setForm(f => ({...f, customer_name: e.target.value}))} />
             <input placeholder="Mobile Number" value={form.mobile_number}
@@ -549,12 +589,8 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
               <div><strong>Fitment (tick):</strong></div>
               {editSchema.labels.map((label) => (
                 <label key={label} style={{ marginRight: 12 }}>
-                  <input
-                    type="checkbox"
-                    checked={!!fit[label]}
-                    onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))}
-                  />{" "}
-                  {label}
+                  <input type="checkbox" checked={!!fit[label]}
+                         onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))} /> {label}
                 </label>
               ))}
             </div>
@@ -569,29 +605,29 @@ const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", 
                     alignItems: "center", justifyContent: "center", padding: 16 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
-// ---------- Main App ----------
+// -------- Main App (with signature step required) --------
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("maxtt_token") || "");
   const [profile, setProfile] = useState(null);
   const [showDetailsId, setShowDetailsId] = useState(null);
 
-  // Franchisee profile
+  // Signature modal
+  const [sigOpen, setSigOpen] = useState(false);
+  const [signatureData, setSignatureData] = useState(""); // base64 PNG
+
+  // Profile
   useEffect(() => {
     if (!token) return;
     fetch(`${API_URL}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => {
-        if (r.status === 401) {
-          localStorage.removeItem("maxtt_token");
-          window.location.reload();
-          return null;
-        }
+        if (r.status === 401) { localStorage.removeItem("maxtt_token"); window.location.reload(); return null; }
         return r.json();
       })
       .then(setProfile)
       .catch(() => setProfile(null));
   }, [token]);
 
-  // Create Invoice form state
+  // Create form
   const [customerName, setCustomerName] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
@@ -611,10 +647,8 @@ export default function App() {
   const [gstin, setGstin] = useState("");
   const [address, setAddress] = useState("");
 
-  // dynamic fitments for create form
   const [fit, setFit] = useState(() => {
-    const init = {};
-    fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
+    const init = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
     return init;
   });
 
@@ -624,16 +658,12 @@ export default function App() {
     const nextTyres = cfg.defaultTyres;
     setTyreCount(nextTyres);
     const schema = fitmentSchema(v, nextTyres);
-    const next = {};
-    schema.labels.forEach(l => (next[l] = false));
-    setFit(next);
+    const next = {}; schema.labels.forEach(l => (next[l] = false)); setFit(next);
   }
   function onTyreCountChange(n) {
     setTyreCount(n);
     const schema = fitmentSchema(vehicleType, n);
-    const next = {};
-    schema.labels.forEach(l => (next[l] = false));
-    setFit(next);
+    const next = {}; schema.labels.forEach(l => (next[l] = false)); setFit(next);
   }
 
   async function saveInvoiceToServer(payload) {
@@ -647,41 +677,31 @@ export default function App() {
         },
         body: JSON.stringify(payload)
       });
-      if (res.status === 401) {
-        localStorage.removeItem("maxtt_token");
-        alert("Session expired. Please log in again.");
-        window.location.reload();
-        return null;
-      }
+      if (res.status === 401) { localStorage.removeItem("maxtt_token"); alert("Session expired. Please log in again."); window.location.reload(); return null; }
       const data = await res.json();
       if (!res.ok) { alert("Save failed: " + (data?.error || "unknown_error")); return null; }
       window.dispatchEvent(new Event("invoices-updated"));
       return data;
-    } catch {
-      alert("Network error while saving invoice");
-      return null;
-    }
+    } catch { alert("Network error while saving invoice"); return null; }
   }
 
+  // Require signature BEFORE saving
   const handleCalculateAndSave = async () => {
     const minTd = minTreadFor(vehicleType);
-    if (Number(treadDepth || 0) < minTd) {
-      alert(`Installation blocked: Tread depth below ${minTd} mm for this category.`);
-      return;
-    }
+    if (Number(treadDepth || 0) < minTd) { alert(`Installation blocked: Tread depth below ${minTd} mm for this category.`); return; }
+    if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number."); return; }
+
+    // If no signature yet, open pad and stop here
+    if (!signatureData) { setSigOpen(true); return; }
+
     const tCount = parseInt(tyreCount || "0", 10);
     if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
 
     const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const totalMl = perTyre * tCount;
+    setDosagePerTyre(perTyre); setDosageTotal(totalMl);
 
-    setDosagePerTyre(perTyre);
-    setDosageTotal(totalMl);
-
-    if (!customerName || !vehicleNumber) {
-      alert("Please fill Customer Name and Vehicle Number to save invoice.");
-      return;
-    }
+    const nowIso = new Date().toISOString();
 
     const saved = await saveInvoiceToServer({
       customer_name: customerName,
@@ -694,12 +714,14 @@ export default function App() {
       tyre_width_mm: Number(tyreWidth || 0),
       aspect_ratio: Number(aspectRatio || 0),
       rim_diameter_in: Number(rimDiameter || 0),
-      dosage_ml: Number(totalMl),
-      gps_lat: null, gps_lng: null, customer_code: null,
       tyre_count: tCount,
       fitment_locations: textFromFitState(fit) || null,
+      dosage_ml: Number(totalMl),
       customer_gstin: gstin || null,
-      customer_address: address || null
+      customer_address: address || null,
+      customer_signature: signatureData,  // base64 image
+      signed_at: nowIso,
+      gps_lat: null, gps_lng: null, customer_code: null
     });
 
     if (saved?.id) {
@@ -707,6 +729,8 @@ export default function App() {
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
       if (inv) generateInvoicePDF(inv, profile);
+      // reset signature for next invoice
+      setSignatureData("");
     }
   };
 
@@ -721,7 +745,6 @@ export default function App() {
         <button onClick={() => { localStorage.removeItem("maxtt_token"); setToken(""); }}>Logout</button>
       </div>
 
-      {/* Franchisee header */}
       {profile && (
         <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13 }}>
           <strong>Franchisee:</strong> {profile.name} &nbsp;|&nbsp;
@@ -783,36 +806,38 @@ export default function App() {
           <div style={{ marginBottom: 6 }}><strong>Fitment Location:</strong></div>
           {schema.labels.map(label => (
             <label key={label} style={{ marginRight: 12 }}>
-              <input
-                type="checkbox"
-                checked={!!fit[label]}
-                onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))}
-              />{" "}
-              {label}
+              <input type="checkbox" checked={!!fit[label]}
+                     onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))} /> {label}
             </label>
           ))}
         </div>
 
-        <button onClick={handleCalculateAndSave}>Calculate Dosage & Save (Auto PDF)</button>
-
-        {(dosagePerTyre !== null || dosageTotal !== null) && (
-          <div style={{ marginTop: 12 }}>
-            {dosagePerTyre !== null && (<div><strong>Per-tyre Dosage:</strong> {dosagePerTyre} ml</div>)}
-            {dosageTotal !== null && (<div><strong>Total Dosage:</strong> {dosageTotal} ml for {tyreCount} tyres</div>)}
-            <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-              (Per-tyre rounded to nearest 25 ml; includes buffer by category)
-            </div>
-          </div>
+        {/* Signature gate */}
+        {!signatureData ? (
+          <button onClick={() => setSigOpen(true)} style={{ marginRight: 8 }}>
+            Capture Customer Signature
+          </button>
+        ) : (
+          <span style={{ marginRight: 12, color: "green" }}>Signature captured ✓</span>
         )}
+        <button onClick={handleCalculateAndSave}>Calculate Dosage & Save (Auto PDF)</button>
       </div>
 
-      {/* Invoices list, filters, export, summary, details */}
+      {/* Recent Invoices table */}
       <RecentInvoices token={token} profile={profile} onOpenDetails={(id) => setShowDetailsId(id)} />
 
+      {/* Details modal */}
       {showDetailsId && (
         <DetailsModal token={token} invoiceId={showDetailsId} profile={profile}
           onClose={() => setShowDetailsId(null)} onEdited={() => {}} />
       )}
+
+      {/* Signature modal */}
+      <SignaturePad
+        open={sigOpen}
+        onClose={() => setSigOpen(false)}
+        onSave={(dataUrl) => { setSignatureData(dataUrl); setSigOpen(false); }}
+      />
     </div>
   );
 }
