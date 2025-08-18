@@ -162,7 +162,7 @@ function LoginView({ onLoggedIn }) {
   );
 }
 
-// ---------- Recent Invoices (A, B: filter/export/summary, details) ----------
+// ---------- Invoices list (filters + auto-search + export + details) ----------
 function RecentInvoices({ token, profile, onOpenDetails }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -194,6 +194,13 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
       .then(r => r.json()).then(setSummary).catch(() => setSummary(null));
   }, [q, from, to, token]);
 
+  // 🔄 Auto-search when you type (debounced)
+  useEffect(() => {
+    const t = setTimeout(fetchRows, 400);
+    return () => clearTimeout(t);
+  }, [q, from, to, fetchRows]);
+
+  // initial load
   useEffect(() => {
     fetchRows();
     const onUpdated = () => fetchRows();
@@ -221,6 +228,10 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
       .catch(() => alert("Export failed"));
   }
 
+  function onPressEnter(e) {
+    if (e.key === "Enter") fetchRows();
+  }
+
   if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
   if (error) return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
 
@@ -229,12 +240,27 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
       <h2>Invoices</h2>
 
       {/* Filters */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}>
-        <input placeholder="Search name or vehicle no." value={q} onChange={e => setQ(e.target.value)} />
-        <label>From: <input type="date" value={from} onChange={e => setFrom(e.target.value)} /></label>
-        <label>To: <input type="date" value={to} onChange={e => setTo(e.target.value)} /></label>
+      <div style={{
+        display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center",
+        marginBottom: 10, border: "1px solid #eee", padding: 8, borderRadius: 6
+      }}>
+        <input
+          placeholder="Search name or vehicle no."
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          onKeyDown={onPressEnter}
+          style={{ flex: 1, minWidth: 280 }}
+        />
+        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          From:
+          <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          To:
+          <input type="date" value={to} onChange={e => setTo(e.target.value)} />
+        </label>
         <button onClick={fetchRows}>Apply</button>
-        <button onClick={() => { setQ(""); setFrom(""); setTo(""); }}>Clear</button>
+        <button onClick={() => { setQ(""); setFrom(""); setTo(""); }}>Show All</button>
         <button onClick={exportCsv}>Export CSV</button>
       </div>
 
@@ -252,7 +278,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
 
       {/* Table */}
       {rows.length === 0 ? (
-        <div>No invoices yet.</div>
+        <div>No invoices found.</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table border="1" cellPadding="6" style={{ minWidth: 1260 }}>
@@ -272,23 +298,21 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => {
-                return (
-                  <tr key={r.id}>
-                    <td>{r.id}</td>
-                    <td>{new Date(r.created_at).toLocaleString()}</td>
-                    <td>{r.customer_name ?? ""}</td>
-                    <td>{r.vehicle_number ?? ""}</td>
-                    <td>{r.vehicle_type ?? ""}</td>
-                    <td>{r.tyre_count ?? ""}</td>
-                    <td>{r.fitment_locations || ""}</td>
-                    <td>{r.dosage_ml ?? ""}</td>
-                    <td>{inr(r.total_with_gst)}</td>
-                    <td><button onClick={() => generateInvoicePDF(r, profile)}>PDF</button></td>
-                    <td><button onClick={() => onOpenDetails(r.id)}>Open</button></td>
-                  </tr>
-                );
-              })}
+              {rows.map(r => (
+                <tr key={r.id}>
+                  <td>{r.id}</td>
+                  <td>{new Date(r.created_at).toLocaleString()}</td>
+                  <td>{r.customer_name ?? ""}</td>
+                  <td>{r.vehicle_number ?? ""}</td>
+                  <td>{r.vehicle_type ?? ""}</td>
+                  <td>{r.tyre_count ?? ""}</td>
+                  <td>{r.fitment_locations || ""}</td>
+                  <td>{r.dosage_ml ?? ""}</td>
+                  <td>{inr(r.total_with_gst)}</td>
+                  <td><button onClick={() => generateInvoicePDF(r, profile)}>PDF</button></td>
+                  <td><button onClick={() => onOpenDetails(r.id)}>Open</button></td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -297,7 +321,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
   );
 }
 
-// ---------- Details + Edit modal (A, D) ----------
+// ---------- Details + Edit modal ----------
 function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
   const [inv, setInv] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -468,7 +492,7 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
 const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
-// ---------- Main App (A–E all) ----------
+// ---------- Main App ----------
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("maxtt_token") || "");
   const [profile, setProfile] = useState(null);
@@ -481,7 +505,7 @@ export default function App() {
       .then(r => r.json()).then(setProfile).catch(() => setProfile(null));
   }, [token]);
 
-  // ======== Create Invoice form (same base as before, with auto-PDF after save) ========
+  // ======== Create Invoice form (same as before, auto-PDF after save) ========
   const [customerName, setCustomerName] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
@@ -581,7 +605,7 @@ export default function App() {
 
     if (saved?.id) {
       alert(`Invoice saved. ID: ${saved.id}`);
-      // (C) Auto-open PDF: fetch the saved invoice and print
+      // Auto-open PDF: fetch the saved invoice and print
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
       if (inv) generateInvoicePDF(inv, profile);
