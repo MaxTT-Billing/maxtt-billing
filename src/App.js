@@ -4,7 +4,7 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
 const API_URL = "https://maxtt-billing-api.onrender.com";
-const API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // <-- set this to your backend API_KEY
+const API_KEY = "supersecret123"; // <-- set this to your backend API_KEY
 
 // INR formatting
 function inr(num) {
