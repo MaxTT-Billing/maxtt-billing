@@ -1,4 +1,8 @@
-// src/App.js — Base Layout v1 (locked) — IST fix, per-tyre treads in PDF, hanging indent paragraphs, bottom signature bands
+// src/App.js — Base Layout v1 — formatting update:
+// - Per-tyre tread depths render cleanly (2-per line)
+// - Larger boxed areas for Installer/Customer signatures
+// - Declaration & T&C smaller font/tighter line-height
+// - All prior features preserved
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -13,7 +17,7 @@ const PRICE_PER_ML = 4.5;     // ₹ per ml — fixed
 const GST_PERCENT  = 18;      // % — fixed
 const DISCOUNT_MAX_PCT = 30;  // hard cap at 30%
 
-// ====== Font loader (Poppins, no HTML edits needed) ======
+// ====== Font loader (Poppins) ======
 function HeadFontLoader() {
   useEffect(() => {
     const id = "poppins-font-link";
@@ -35,7 +39,6 @@ function parseDateFlexible(v) {
   const s = String(v);
   const d = new Date(s);
   if (!isNaN(d)) return d;
-  // try ISO without timezone → assume UTC
   const s2 = s.includes("T") ? s : s.replace(" ", "T");
   const addZ = /[zZ]|[+\-]\d{2}:\d{2}$/.test(s2) ? s2 : (s2 + "Z");
   const d2 = new Date(addZ);
@@ -170,39 +173,34 @@ async function preloadWatermark() {
     });
   } catch { return null; }
 }
-function AssetsLoader() {
-  useEffect(() => { preloadWatermark(); }, []);
-  return null;
-}
+function AssetsLoader() { useEffect(() => { preloadWatermark(); }, []); return null; }
 
 // ===== PDF helpers =====
-function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 12) {
+function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, fontSize = 9.5) {
   // Title
   try { doc.setFont(undefined, "bold"); } catch {}
-  doc.setFontSize(10.5);
+  doc.setFontSize(fontSize + 1);
   doc.text(title, x, y);
   y += lineH;
   try { doc.setFont(undefined, "normal"); } catch {}
 
   // Hanging indent for numbers (1., 2., …)
-  const numberWidth = doc.getTextWidth("00. "); // rough width
+  const numberWidth = doc.getTextWidth("00. ");
   const gap = 4;
   const textWidth = maxWidth - numberWidth - gap;
 
+  doc.setFontSize(fontSize);
   items.forEach((txt, idx) => {
     const label = `${idx + 1}.`;
     doc.text(label, x, y);
     const lines = doc.splitTextToSize(txt, textWidth);
-    lines.forEach((ln) => {
-      doc.text(ln, x + numberWidth + gap, y);
-      y += lineH;
-    });
-    y += 2; // small gap between points
+    lines.forEach((ln) => { doc.text(ln, x + numberWidth + gap, y); y += lineH; });
+    y += 1; // small gap between points
   });
   return y;
 }
 
-// ===== PDF =====
+// ===== PDF (UPDATED FORMATTING) =====
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -264,22 +262,32 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.setFontSize(10.5);
   const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25 : null;
 
-  const treadList = (() => {
+  // Tread depths pretty (2 items per line)
+  const treadMap = (() => {
     try { return inv.tread_depths_json ? JSON.parse(inv.tread_depths_json) : null; } catch { return null; }
   })();
-  const treadLine = treadList
-    ? Object.entries(treadList).map(([k, v]) => `${k.split(" ×")[0]}: ${v}mm`).join(" | ")
-    : (inv.tread_depth_mm != null ? `Min Tread: ${inv.tread_depth_mm} mm` : "");
+  let treadBlockLines = [];
+  if (treadMap && typeof treadMap === "object") {
+    const entries = Object.entries(treadMap).map(([k, v]) => `${k.split(" ×")[0]}: ${v}mm`);
+    for (let i = 0; i < entries.length; i += 2) {
+      treadBlockLines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
+    }
+  }
+  const treadHeader = treadBlockLines.length ? "Tread Depths (mm):" :
+    (inv.tread_depth_mm != null ? `Min Tread: ${inv.tread_depth_mm} mm` : "");
 
-  [
+  // Right column items
+  const rightItems = [
     `Vehicle Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
-    `Tread Depths: ${treadLine}`,
+    treadHeader,
+    ...(treadBlockLines.length ? treadBlockLines : []),
     `Fitment: ${inv.fitment_locations || ""}`,
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
-  ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 16 + i * 14));
+  ];
+  rightItems.forEach((t, i) => doc.text(t, xRight, yTyreStart + 16 + i * 14));
 
   // Amounts (with discount/installation/tax split)
   const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
@@ -289,17 +297,13 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const base = Math.max(0, baseRaw - discountUsed + install);
   let cgst = 0, sgst = 0, igst = 0;
   const mode = (taxMode || inv.tax_mode) === "IGST" ? "IGST" : "CGST_SGST";
-  if (mode === "CGST_SGST") {
-    cgst = (base * GST_PERCENT) / 200;
-    sgst = (base * GST_PERCENT) / 200;
-  } else {
-    igst = (base * GST_PERCENT) / 100;
-  }
+  if (mode === "CGST_SGST") { cgst = (base * GST_PERCENT) / 200; sgst = (base * GST_PERCENT) / 200; }
+  else { igst = (base * GST_PERCENT) / 100; }
   const gstTotal = cgst + sgst + igst;
   const grand = base + gstTotal;
 
   doc.autoTable({
-    startY: yCustStart + 140,
+    startY: yCustStart + 150,
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
@@ -307,7 +311,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["Gross (dosage × price)", inr(baseRaw)],
       ["Discount (₹)", `-${inr(discountUsed)} (cap ${DISCOUNT_MAX_PCT}%)`],
       ["Installation Charges (₹)", inr(install)],
-      ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
+      ["Tax Mode", mode === "CGST_SGST" ? "CGT+SGST" : "IGST"],
       ["CGST (9%)", inr(cgst)],
       ["SGST (9%)", inr(sgst)],
       ["IGST (18%)", inr(igst)],
@@ -320,8 +324,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
     margin: { left: margin, right: margin }
   });
 
-  // Signature block
-  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 14 : 460;
+  // Signature block (legacy inline signature preview)
+  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 12 : 460;
   doc.setFontSize(10.5);
   doc.text("Customer Signature:", margin, yAfter);
   if (inv.customer_signature) {
@@ -331,33 +335,37 @@ function generateInvoicePDF(inv, profile, taxMode) {
     const sdt = parseDateFlexible(inv.signed_at);
     doc.text(`Signed at: ${formatIST(sdt)}`, margin + 280, yAfter);
   }
-  yAfter += 60;
+  yAfter += 58;
 
-  // Declaration + T&C with hanging indent
+  // Declaration + T&C with hanging indent (smaller)
   const maxWidth = pageWidth - margin * 2;
   const declItems = [
     "I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
     "I have read, understood, and accepted the Terms & Conditions stated herein.",
     "I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions."
   ];
-  yAfter = drawNumberedSection(doc, "Customer Declaration", declItems, margin, yAfter, maxWidth, 12);
+  yAfter = drawNumberedSection(doc, "Customer Declaration", declItems, margin, yAfter, maxWidth, 11, 9.5);
 
   const termsItems = [
     "The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
     "Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
     "By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions."
   ];
-  yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, margin, yAfter, maxWidth, 12);
+  yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, margin, yAfter, maxWidth, 11, 9.5);
 
-  // Bottom signature bands (Installer stamp left, Customer signature right)
-  const bandY = pageHeight - 80;
-  // lines
-  doc.line(margin, bandY, margin + 220, bandY);
-  doc.line(pageWidth - margin - 220, bandY, pageWidth - margin, bandY);
-  // labels
+  // Bottom signature boxes (bigger, with space to sign/stamp)
+  const boxWidth = 260, boxHeight = 64;
+  const gapFromBottom = 70;
+  const boxY = pageHeight - gapFromBottom - boxHeight;
+
+  // left box
+  doc.rect(margin, boxY, boxWidth, boxHeight);
   doc.setFontSize(10);
-  doc.text("Installer Sign & Stamp", margin, bandY + 16);
-  doc.text("Customer Signature", pageWidth - margin - 220, bandY + 16);
+  doc.text("Installer Sign & Stamp", margin + 10, boxY + boxHeight + 14);
+
+  // right box
+  doc.rect(pageWidth - margin - boxWidth, boxY, boxWidth, boxHeight);
+  doc.text("Customer Signature", pageWidth - margin - boxWidth + 10, boxY + boxHeight + 14);
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
@@ -628,11 +636,7 @@ function RecentInvoices({ token, profile }) {
   );
 }
 
-const modalWrap = {
-  position: "fixed", inset: 0, background: "rgba(0,0,0,.40)",
-  display: "flex", alignItems: "center", justifyContent: "center",
-  padding: 16, zIndex: 9999
-};
+const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.40)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 9999 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
 // ===== Franchisee App (Base Layout v1) =====
@@ -759,12 +763,8 @@ function FranchiseeApp({ token, onLogout }) {
 
     const amountBeforeTax = Math.max(0, baseRaw - discountUsed + installation);
     let cgst = 0, sgst = 0, igst = 0;
-    if (taxMode === "CGST_SGST") {
-      cgst = (amountBeforeTax * GST_PERCENT) / 200; // half
-      sgst = (amountBeforeTax * GST_PERCENT) / 200; // half
-    } else {
-      igst = (amountBeforeTax * GST_PERCENT) / 100;
-    }
+    if (taxMode === "CGST_SGST") { cgst = (amountBeforeTax * GST_PERCENT) / 200; sgst = (amountBeforeTax * GST_PERCENT) / 200; }
+    else { igst = (amountBeforeTax * GST_PERCENT) / 100; }
     const gstTotal = cgst + sgst + igst;
     const grand = amountBeforeTax + gstTotal;
 
@@ -806,10 +806,10 @@ function FranchiseeApp({ token, onLogout }) {
       discount: discountUsed,
       installation_fee: installation,
       tax_mode: taxMode,
-      gst_percentage: GST_PERCENT,          // legacy field
-      total_before_gst: amountBeforeTax,    // legacy field (pre-tax)
-      gst_amount: gstTotal,                 // legacy field (total GST)
-      total_with_gst: grand,                // grand total
+      gst_percentage: GST_PERCENT,
+      total_before_gst: amountBeforeTax,
+      gst_amount: gstTotal,
+      total_with_gst: grand,
       cgst_amount: cgst,
       sgst_amount: sgst,
       igst_amount: igst,
@@ -826,14 +826,13 @@ function FranchiseeApp({ token, onLogout }) {
 
     if (saved?.id) {
       alert(`Invoice saved. ID: ${saved.id}`);
-      // Fetch full invoice (so PDF has everything), but also ensure per-tyre depths are present even if DB column not added yet
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
       if (inv) {
         const invForPdf = { ...inv, tread_depths_json: JSON.stringify(treadByTyre) };
         generateInvoicePDF(invForPdf, profile, taxMode);
       }
-      setSignatureData(""); setConsentMeta(null); // ready for next invoice
+      setSignatureData(""); setConsentMeta(null);
     }
   };
 
