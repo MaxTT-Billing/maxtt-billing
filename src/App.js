@@ -1,4 +1,4 @@
-// src/App.js — Single-file UI (IST time + required pricing + consent gate + CSV export)
+// src/App.js — Hard-wired price (no inputs) + IST time + consent gate + CSV
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -8,6 +8,10 @@ const API_URL =
   process.env.REACT_APP_API_BASE_URL || "https://maxtt-billing-api.onrender.com";
 const API_KEY = "supersecret123"; // used for writes (create/update)
 const IST_FMT = { timeZone: "Asia/Kolkata" };
+
+// >>> Hard-wired pricing (edit these two lines if you ever need to change) <<<
+const PRICE_PER_ML = 2.5;   // ₹ per ml (fixed)
+const GST_PERCENT  = 18;    // % (fixed)
 
 // ===== Money (INR) =====
 function inr(num) {
@@ -434,7 +438,7 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
               <tr>
                 <th>ID</th><th>Date/Time (IST)</th><th>Customer</th><th>Vehicle</th>
                 <th>Category</th><th>Tyres</th><th>Fitment</th>
-                <th>Total Dosage (ml)</th><th>Total (₹)</th><th>PDF</th><th>Details</th>
+                <th>Total Dosage (ml)</th><th>Total (₹)</th><th>PDF</th>
               </tr>
             </thead>
             <tbody>
@@ -450,7 +454,6 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
                   <td>{r.dosage_ml ?? ""}</td>
                   <td>{inr(r.total_with_gst)}</td>
                   <td><button onClick={() => generateInvoicePDF(r, profile)}>PDF</button></td>
-                  <td><button onClick={() => onOpenDetails(r.id)}>Open</button></td>
                 </tr>
               ))}
             </tbody>
@@ -458,208 +461,6 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
         </div>
       )}
     </div>
-  );
-}
-
-// ===== Details modal (view/edit) =====
-function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
-  const [inv, setInv] = useState(null);
-  const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({});
-  const [fit, setFit] = useState({});
-  const authHeaders = { Authorization: `Bearer ${token}` };
-
-  useEffect(() => {
-    fetch(`${API_URL}/api/invoices/${invoiceId}`, { headers: authHeaders })
-      .then(r => r.json()).then(setInv).catch(() => setInv(null));
-  }, [invoiceId]);
-
-  useEffect(() => {
-    if (inv) {
-      const vtype = inv.vehicle_type || "4-Wheeler (Passenger Car/Van/SUV)";
-      const schema = fitmentSchema(vtype, inv.tyre_count);
-      const selected = {};
-      const text = inv.fitment_locations || "";
-      schema.labels.forEach(l => (selected[l] = text.includes(l)));
-      setFit(selected);
-
-      setForm({
-        customer_name: inv.customer_name || "",
-        mobile_number: inv.mobile_number || "",
-        vehicle_number: inv.vehicle_number || "",
-        odometer: inv.odometer ?? "",
-        tread_depth_mm: inv.tread_depth_mm ?? "",
-        installer_name: inv.installer_name || "",
-        vehicle_type: vtype,
-        tyre_width_mm: inv.tyre_width_mm ?? "",
-        aspect_ratio: inv.aspect_ratio ?? "",
-        rim_diameter_in: inv.rim_diameter_in ?? "",
-        tyre_count: inv.tyre_count ?? "",
-        customer_gstin: inv.customer_gstin || "",
-        customer_address: inv.customer_address || "",
-        dosage_ml: inv.dosage_ml ?? "",
-        price_per_ml: inv.price_per_ml ?? "",
-        gst_percentage: inv.gst_percentage ?? 18,
-        customer_signature: inv.customer_signature || "",
-        signed_at: inv.signed_at || ""
-      });
-    }
-  }, [inv]);
-
-  function onChangeVehicleType(v) {
-    setForm(f => ({ ...f, vehicle_type: v }));
-    const schema = fitmentSchema(v, form.tyre_count);
-    const next = {}; schema.labels.forEach(l => (next[l] = false)); setFit(next);
-  }
-  function onChangeTyreCount(n) {
-    setForm(f => ({ ...f, tyre_count: n }));
-    const schema = fitmentSchema(form.vehicle_type, n);
-    const next = {}; schema.labels.forEach(l => (next[l] = false)); setFit(next);
-  }
-
-  async function saveEdits() {
-    const price = num(form.price_per_ml);
-    const gstPct = num(form.gst_percentage, 18);
-    const before = num(form.dosage_ml) * price;
-    const gstAmt = (before * gstPct) / 100;
-    const total  = before + gstAmt;
-
-    const payload = {
-      ...form,
-      odometer: form.odometer === "" ? null : Number(form.odometer),
-      tread_depth_mm: form.tread_depth_mm === "" ? null : Number(form.tread_depth_mm),
-      tyre_width_mm: form.tyre_width_mm === "" ? null : Number(form.tyre_width_mm),
-      aspect_ratio: form.aspect_ratio === "" ? null : Number(form.aspect_ratio),
-      rim_diameter_in: form.rim_diameter_in === "" ? null : Number(form.rim_diameter_in),
-      tyre_count: form.tyre_count === "" ? null : Number(form.tyre_count),
-      dosage_ml: form.dosage_ml === "" ? null : Number(form.dosage_ml),
-      fitment_locations: textFromFitState(fit),
-      price_per_ml: price,
-      gst_percentage: gstPct,
-      total_before_gst: before,
-      gst_amount: gstAmt,
-      total_with_gst: total
-    };
-
-    try {
-      const res = await fetch(`${API_URL}/api/invoices/${invoiceId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": API_KEY,
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (!res.ok) { alert("Update failed: " + (data?.error || "unknown_error")); return; }
-      alert("Invoice updated");
-      setEditing(false);
-      onEdited && onEdited();
-      fetch(`${API_URL}/api/invoices/${invoiceId}`, { headers: authHeaders })
-        .then(r => r.json()).then(setInv).catch(() => {});
-      window.dispatchEvent(new Event("invoices-updated"));
-    } catch { alert("Network error"); }
-  }
-
-  if (!inv) {
-    return (
-      <div style={modalWrap}><div style={modalBox}>
-        <div>Loading…</div>
-        <div style={{ textAlign: "right", marginTop: 10 }}><button onClick={onClose}>Close</button></div>
-      </div></div>
-    );
-  }
-
-  const editSchema = fitmentSchema(form.vehicle_type, form.tyre_count);
-
-  return (
-    <div style={modalWrap}><div style={modalBox}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h3 style={{ margin: 0 }}>Invoice #{inv.id}</h3>
-        <div>
-          <button onClick={() => generateInvoicePDF(inv, profile)} style={{ marginRight: 8 }}>Reprint PDF</button>
-          {!editing && <button onClick={() => setEditing(true)} style={{ marginRight: 8 }}>Edit</button>}
-          {editing &&  <button onClick={saveEdits} style={{ marginRight: 8 }}>Save</button>}
-          <button onClick={onClose}>Close</button>
-        </div>
-      </div>
-
-      {!editing ? (
-        <div style={{ marginTop: 10 }}>
-          <div><strong>Date:</strong> {new Date(inv.created_at).toLocaleString("en-IN", IST_FMT)}</div>
-          <div><strong>Customer:</strong> {inv.customer_name} ({inv.mobile_number || "-"})</div>
-          <div><strong>Vehicle:</strong> {inv.vehicle_number}</div>
-          <div><strong>Category:</strong> {inv.vehicle_type} &nbsp; <strong>Tyres:</strong> {inv.tyre_count}</div>
-          <div><strong>Tyre Size:</strong> {inv.tyre_width_mm}/{inv.aspect_ratio} R{inv.rim_diameter_in}</div>
-          <div><strong>Tread Depth:</strong> {inv.tread_depth_mm} mm</div>
-          <div><strong>Fitment:</strong> {inv.fitment_locations || "-"}</div>
-          <div><strong>Total Dosage:</strong> {inv.dosage_ml} ml</div>
-          <div><strong>Price/ml:</strong> {inr(inv.price_per_ml)}</div>
-          <div><strong>Amount (before GST):</strong> {inr(inv.total_before_gst)}</div>
-          <div><strong>GST:</strong> {inr(inv.gst_amount)}</div>
-          <div><strong>Total (with GST):</strong> {inr(inv.total_with_gst)}</div>
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
-          <input placeholder="Customer Name" value={form.customer_name}
-                 onChange={e => setForm(f => ({...f, customer_name: e.target.value}))} />
-          <input placeholder="Mobile Number" value={form.mobile_number}
-                 onChange={e => setForm(f => ({...f, mobile_number: e.target.value}))} />
-          <input placeholder="Vehicle Number" value={form.vehicle_number}
-                 onChange={e => setForm(f => ({...f, vehicle_number: e.target.value}))} />
-          <input placeholder="Odometer" value={form.odometer}
-                 onChange={e => setForm(f => ({...f, odometer: e.target.value}))} />
-          <input placeholder="Tread Depth (mm)" value={form.tread_depth_mm}
-                 onChange={e => setForm(f => ({...f, tread_depth_mm: e.target.value}))} />
-          <input placeholder="Installer Name" value={form.installer_name}
-                 onChange={e => setForm(f => ({...f, installer_name: e.target.value}))} />
-
-          <div style={{ gridColumn: "1 / span 2" }}>
-            <label style={{ marginRight: 8 }}>Vehicle Category</label>
-            <select value={form.vehicle_type} onChange={e => onChangeVehicleType(e.target.value)}>
-              <option>2-Wheeler (Scooter/Motorcycle)</option>
-              <option>3-Wheeler (Auto)</option>
-              <option>4-Wheeler (Passenger Car/Van/SUV)</option>
-              <option>6-Wheeler (Bus/LTV)</option>
-              <option>HTV (>6 wheels: Trucks/Trailers/Mining)</option>
-            </select>
-          </div>
-
-          <input placeholder="Tyre Width (mm)" value={form.tyre_width_mm}
-                 onChange={e => setForm(f => ({...f, tyre_width_mm: e.target.value}))} />
-          <input placeholder="Aspect Ratio (%)" value={form.aspect_ratio}
-                 onChange={e => setForm(f => ({...f, aspect_ratio: e.target.value}))} />
-          <input placeholder="Rim Diameter (in)" value={form.rim_diameter_in}
-                 onChange={e => setForm(f => ({...f, rim_diameter_in: e.target.value}))} />
-          <input placeholder="Tyre Count" value={form.tyre_count}
-                 onChange={e => onChangeTyreCount(e.target.value)} />
-
-          <input placeholder="Customer GSTIN" value={form.customer_gstin}
-                 onChange={e => setForm(f => ({...f, customer_gstin: e.target.value}))} />
-          <input placeholder="Customer Address" value={form.customer_address}
-                 onChange={e => setForm(f => ({...f, customer_address: e.target.value}))} />
-
-          <input placeholder="Total Dosage (ml)" value={form.dosage_ml}
-                 onChange={e => setForm(f => ({...f, dosage_ml: e.target.value}))} />
-
-          <input placeholder="Price per ml (₹)" value={form.price_per_ml}
-                 onChange={e => setForm(f => ({...f, price_per_ml: e.target.value}))} />
-          <input placeholder="GST % (e.g., 18)" value={form.gst_percentage}
-                 onChange={e => setForm(f => ({...f, gst_percentage: e.target.value}))} />
-
-          <div style={{ gridColumn: "1 / span 2", marginTop: 6 }}>
-            <div><strong>Fitment (tick):</strong></div>
-            {editSchema.labels.map((label) => (
-              <label key={label} style={{ marginRight: 12 }}>
-                <input type="checkbox" checked={!!fit[label]}
-                       onChange={(e) => setFit(prev => ({ ...prev, [label]: e.target.checked }))} /> {label}
-              </label>
-            ))}
-          </div>
-        </div>
-      )}
-    </div></div>
   );
 }
 
@@ -700,10 +501,6 @@ function FranchiseeApp({ token, onLogout }) {
 
   const [gstin, setGstin] = useState("");
   const [address, setAddress] = useState("");
-
-  // Pricing (required)
-  const [pricePerMl, setPricePerMl] = useState(""); // required
-  const [gstPct, setGstPct] = useState(18); // default 18%
 
   const [fit, setFit] = useState(() => {
     const init = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
@@ -761,20 +558,15 @@ function FranchiseeApp({ token, onLogout }) {
     // CONSENT GATE: force signature popup if missing
     if (!signatureData) { setSigOpen(true); return; }
 
-    // Require price
-    const price = num(pricePerMl);
-    const gst = num(gstPct, 18);
-    if (!price) { alert("Please enter Price per ml (₹)."); return; }
-
     const tCount = parseInt(tyreCount || "0", 10);
     if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
 
     const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const totalMl = perTyre * tCount;
 
-    // Totals
-    const before = totalMl * price;
-    const gstAmt = (before * gst) / 100;
+    // Totals using fixed price & GST
+    const before = totalMl * PRICE_PER_ML;
+    const gstAmt = (before * GST_PERCENT) / 100;
     const grand = before + gstAmt;
 
     const defaultConsentText =
@@ -805,9 +597,9 @@ function FranchiseeApp({ token, onLogout }) {
       customer_gstin: gstin || null,
       customer_address: address || null,
 
-      // pricing & totals
-      price_per_ml: price,
-      gst_percentage: gst,
+      // pricing & totals (FIXED)
+      price_per_ml: PRICE_PER_ML,
+      gst_percentage: GST_PERCENT,
       total_before_gst: before,
       gst_amount: gstAmt,
       total_with_gst: grand,
@@ -878,12 +670,6 @@ function FranchiseeApp({ token, onLogout }) {
           <input placeholder="Installer Name" value={installerName} onChange={e => setInstallerName(e.target.value)} />
         </div>
 
-        {/* Pricing */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-          <input placeholder="Price per ml (₹)" value={pricePerMl} onChange={e => setPricePerMl(e.target.value)} />
-          <input placeholder="GST % (e.g., 18)" value={gstPct} onChange={e => setGstPct(e.target.value)} />
-        </div>
-
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
           <div>
             <label style={{ marginRight: 8 }}>Vehicle Category</label>
@@ -947,7 +733,7 @@ function FranchiseeApp({ token, onLogout }) {
   );
 }
 
-// ===== Admin / SA minimal (reuse table) =====
+// ===== Admin & Super Admin (reuse table) =====
 function AdminApp({ token, onLogout }) {
   return (
     <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
