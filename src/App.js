@@ -1,4 +1,4 @@
-// src/App.js — Base Layout v1 (locked): Poppins + fixed ₹/ml + SGST/CGST/IGST + discount cap + per-tyre tread + consent + IST + CSV + logo watermark
+// src/App.js — Base Layout v1 (locked) — IST fix, per-tyre treads in PDF, hanging indent paragraphs, bottom signature bands
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -28,9 +28,21 @@ function HeadFontLoader() {
   return null;
 }
 
-// ===== Helpers =====
+// ===== Helpers (IST + money) =====
+function parseDateFlexible(v) {
+  if (v instanceof Date) return v;
+  if (!v) return new Date();
+  const s = String(v);
+  const d = new Date(s);
+  if (!isNaN(d)) return d;
+  // try ISO without timezone → assume UTC
+  const s2 = s.includes("T") ? s : s.replace(" ", "T");
+  const addZ = /[zZ]|[+\-]\d{2}:\d{2}$/.test(s2) ? s2 : (s2 + "Z");
+  const d2 = new Date(addZ);
+  return isNaN(d2) ? new Date() : d2;
+}
 function formatIST(dateLike) {
-  const d = dateLike instanceof Date ? dateLike : new Date(dateLike);
+  const d = parseDateFlexible(dateLike);
   const fmt = new Intl.DateTimeFormat("en-IN", {
     timeZone: IST_TZ, day: "2-digit", month: "2-digit", year: "numeric",
     hour: "2-digit", minute: "2-digit", hour12: false
@@ -119,30 +131,24 @@ const INDIA_STATE_ABBR = {
   "PUDUCHERRY":"PY","ANDAMAN AND NICOBAR ISLANDS":"AN","TELANGANA":"TS","ANDHRA PRADESH (NEW)":"ANP"
 };
 function stateAbbrFromProfile(profile) {
-  // 1) explicit franchisee_state
   const pstate = (profile?.franchisee_state || "").trim().toUpperCase();
   if (pstate && INDIA_STATE_ABBR[pstate]) return INDIA_STATE_ABBR[pstate];
-
-  // 2) GSTIN
   const gstin = (profile?.gstin || "").trim();
   if (gstin.length >= 2) {
     const code = gstin.slice(0,2);
     if (GST_STATE_NUM_TO_ABBR[code]) return GST_STATE_NUM_TO_ABBR[code];
   }
-
-  // 3) Heuristic from address
   const adr = (profile?.address || "").toUpperCase();
   for (const [name, ab] of Object.entries(INDIA_STATE_ABBR)) {
     if (adr.includes(name)) return ab;
   }
   return "XX";
 }
-
 // Order: FR_CODE / STATE / SEQ / MMYY
 function displayInvoiceCode(inv, profile) {
   const fr = (profile?.franchisee_id || "FR").replace(/\s+/g, "");
   const st = stateAbbrFromProfile(profile);
-  const dt = inv?.created_at ? new Date(inv.created_at) : new Date();
+  const dt = parseDateFlexible(inv?.created_at || Date.now());
   const mm = String(dt.getMonth()+1).padStart(2,"0");
   const yy = String(dt.getFullYear()).slice(-2);
   const seq = String(inv?.id || 1).padStart(4,"0");
@@ -169,6 +175,33 @@ function AssetsLoader() {
   return null;
 }
 
+// ===== PDF helpers =====
+function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 12) {
+  // Title
+  try { doc.setFont(undefined, "bold"); } catch {}
+  doc.setFontSize(10.5);
+  doc.text(title, x, y);
+  y += lineH;
+  try { doc.setFont(undefined, "normal"); } catch {}
+
+  // Hanging indent for numbers (1., 2., …)
+  const numberWidth = doc.getTextWidth("00. "); // rough width
+  const gap = 4;
+  const textWidth = maxWidth - numberWidth - gap;
+
+  items.forEach((txt, idx) => {
+    const label = `${idx + 1}.`;
+    doc.text(label, x, y);
+    const lines = doc.splitTextToSize(txt, textWidth);
+    lines.forEach((ln) => {
+      doc.text(ln, x + numberWidth + gap, y);
+      y += lineH;
+    });
+    y += 2; // small gap between points
+  });
+  return y;
+}
+
 // ===== PDF =====
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
@@ -188,7 +221,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, y);
 
   // Meta
-  const created = inv.created_at ? new Date(inv.created_at) : new Date();
+  const created = parseDateFlexible(inv.created_at || Date.now());
   const dispCode = displayInvoiceCode(inv, profile);
   doc.text(`Invoice No: ${dispCode}`, pageWidth - margin, 40, { align: "right" });
   doc.text(`Date: ${formatIST(created)}`, pageWidth - margin, 56, { align: "right" });
@@ -198,18 +231,17 @@ function generateInvoicePDF(inv, profile, taxMode) {
     try {
       doc.saveGraphicsState();
       doc.setGState(new doc.GState({ opacity: 0.10 }));
-      const wmWidth = 360;
-      const wmHeight = 360;
+      const wmWidth = 360, wmHeight = 360;
       doc.addImage(WATERMARK_DATAURL, "PNG", (pageWidth - wmWidth)/2, (pageHeight - wmHeight)/2 - 40, wmWidth, wmHeight);
       doc.restoreGraphicsState();
     } catch {}
   } else {
-    doc.saveGraphicsState && doc.saveGraphicsState();
+    try { doc.saveGraphicsState(); } catch {}
     doc.setFontSize(52);
     doc.setTextColor(210);
     doc.text("Treadstone Solutions", pageWidth / 2, pageHeight/2 - 20, { angle: 35, align: "center" });
     doc.setTextColor(0);
-    doc.restoreGraphicsState && doc.restoreGraphicsState();
+    try { doc.restoreGraphicsState(); } catch {}
   }
 
   // Customer block
@@ -296,41 +328,36 @@ function generateInvoicePDF(inv, profile, taxMode) {
     try { doc.addImage(inv.customer_signature, "PNG", margin + 120, yAfter - 12, 130, 44); } catch {}
   }
   if (inv.signed_at) {
-    const sdt = new Date(inv.signed_at);
+    const sdt = parseDateFlexible(inv.signed_at);
     doc.text(`Signed at: ${formatIST(sdt)}`, margin + 280, yAfter);
   }
   yAfter += 60;
 
-  // Declaration + T&C (smaller font, tighter)
-  doc.setFontSize(10);
+  // Declaration + T&C with hanging indent
   const maxWidth = pageWidth - margin * 2;
-  const decl = [
-    "Customer Declaration",
-    "1. I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
-    "2. I have read, understood, and accepted the Terms & Conditions stated herein.",
-    "3. I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions.",
+  const declItems = [
+    "I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
+    "I have read, understood, and accepted the Terms & Conditions stated herein.",
+    "I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions."
   ];
-  decl.forEach((p, idx) => {
-    const wrapped = doc.splitTextToSize(p, maxWidth);
-    if (idx === 0) { doc.setFontSize(10.5); doc.setFont(undefined, "bold"); }
-    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 12; });
-    if (idx === 0) { doc.setFont(undefined, "normal"); doc.setFontSize(10); }
-    yAfter += 2;
-  });
+  yAfter = drawNumberedSection(doc, "Customer Declaration", declItems, margin, yAfter, maxWidth, 12);
 
-  const footer = [
-    "Terms & Conditions",
-    "1. The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
-    "2. Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
-    "3. By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions.",
+  const termsItems = [
+    "The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
+    "Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
+    "By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions."
   ];
-  footer.forEach((p, idx) => {
-    const wrapped = doc.splitTextToSize(p, maxWidth);
-    if (idx === 0) { doc.setFontSize(10.5); doc.setFont(undefined, "bold"); }
-    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 12; });
-    if (idx === 0) { doc.setFont(undefined, "normal"); doc.setFontSize(10); }
-    yAfter += 1;
-  });
+  yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, margin, yAfter, maxWidth, 12);
+
+  // Bottom signature bands (Installer stamp left, Customer signature right)
+  const bandY = pageHeight - 80;
+  // lines
+  doc.line(margin, bandY, margin + 220, bandY);
+  doc.line(pageWidth - margin - 220, bandY, pageWidth - margin, bandY);
+  // labels
+  doc.setFontSize(10);
+  doc.text("Installer Sign & Stamp", margin, bandY + 16);
+  doc.text("Customer Signature", pageWidth - margin - 220, bandY + 16);
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
@@ -527,6 +554,15 @@ function RecentInvoices({ token, profile }) {
     } catch { alert("Export failed"); }
   }
 
+  async function printPdfFor(id) {
+    try {
+      const r = await fetch(`${API_URL}/api/invoices/${id}`, { headers: headersAuth });
+      const inv = await r.json();
+      if (!r.ok) throw new Error("fetch failed");
+      generateInvoicePDF(inv, profile, inv.tax_mode || "CGST_SGST");
+    } catch { alert("Could not fetch invoice for PDF"); }
+  }
+
   if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
   if (error)   return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
 
@@ -581,7 +617,7 @@ function RecentInvoices({ token, profile }) {
                   <td>{r.fitment_locations || ""}</td>
                   <td>{r.dosage_ml ?? ""}</td>
                   <td>{inr(r.total_with_gst)}</td>
-                  <td><button onClick={() => generateInvoicePDF(r, profile, r.tax_mode || "CGST_SGST")}>PDF</button></td>
+                  <td><button onClick={() => printPdfFor(r.id)}>PDF</button></td>
                 </tr>
               ))}
             </tbody>
@@ -790,9 +826,13 @@ function FranchiseeApp({ token, onLogout }) {
 
     if (saved?.id) {
       alert(`Invoice saved. ID: ${saved.id}`);
+      // Fetch full invoice (so PDF has everything), but also ensure per-tyre depths are present even if DB column not added yet
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
-      if (inv) generateInvoicePDF(inv, profile, taxMode);
+      if (inv) {
+        const invForPdf = { ...inv, tread_depths_json: JSON.stringify(treadByTyre) };
+        generateInvoicePDF(invForPdf, profile, taxMode);
+      }
       setSignatureData(""); setConsentMeta(null); // ready for next invoice
     }
   };
