@@ -80,6 +80,9 @@ function inrRs(n) {
   const withCommas = other.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + last3;
   return `Rs. ${withCommas}.${dec}`;
 }
+function hasExplicitTZ(s) {
+  return /[zZ]|[+\-]\d{2}:\d{2}$/.test(s);
+}
 function parseDateFlexible(v) {
   if (v instanceof Date) return v;
   if (!v) return new Date();
@@ -87,26 +90,46 @@ function parseDateFlexible(v) {
   const d = new Date(s);
   if (!isNaN(d)) return d;
   const s2 = s.includes("T") ? s : s.replace(" ", "T");
-  const addZ = /[zZ]|[+\-]\d{2}:\d{2}$/.test(s2) ? s2 : (s2 + "Z");
+  const addZ = hasExplicitTZ(s2) ? s2 : (s2 + "Z");
   const d2 = new Date(addZ);
   return isNaN(d2) ? new Date() : d2;
 }
 const pad2 = (x) => String(x).padStart(2, "0");
-/** Strong IST formatter (manual +330 min) */
+/** IST formatter
+ *  - If value has timezone (Z or ±HH:MM): convert to IST.
+ *  - If it does NOT have timezone: treat it as already IST (no extra shift).
+ */
 function formatIST(dateLike) {
-  const d = parseDateFlexible(dateLike);
-  const utcMs = Date.UTC(
-    d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
-    d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
-  );
-  const istMs = utcMs + 330 * 60 * 1000; // +5:30
-  const t = new Date(istMs);
-  const DD = pad2(t.getUTCDate());
-  const MM = pad2(t.getUTCMonth() + 1);
-  const YYYY = t.getUTCFullYear();
-  const HH = pad2(t.getUTCHours());
-  const mm = pad2(t.getUTCMinutes());
-  return `${DD}/${MM}/${YYYY}, ${HH}:${mm} IST`;
+  if (dateLike instanceof Date) {
+    const d = dateLike;
+    const utcMs = Date.UTC(
+      d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+      d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
+    );
+    const istMs = utcMs + 330 * 60 * 1000;
+    const t = new Date(istMs);
+    return `${pad2(t.getUTCDate())}/${pad2(t.getUTCMonth()+1)}/${t.getUTCFullYear()}, ${pad2(t.getUTCHours())}:${pad2(t.getUTCMinutes())} IST`;
+  }
+  const s = String(dateLike || "");
+  if (hasExplicitTZ(s)) {
+    const d = new Date(s);
+    const utcMs = Date.UTC(
+      d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+      d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
+    );
+    const istMs = utcMs + 330 * 60 * 1000;
+    const t = new Date(istMs);
+    return `${pad2(t.getUTCDate())}/${pad2(t.getUTCMonth()+1)}/${t.getUTCFullYear()}, ${pad2(t.getUTCHours())}:${pad2(t.getUTCMinutes())} IST`;
+  }
+  // naive string → already IST; try to pick components
+  const m = s.match(/(\d{4})[-/](\d{2})[-/](\d{2})[T\s](\d{2}):(\d{2})/);
+  if (m) {
+    const [,Y,Mo,D,H,Mi] = m.map(Number);
+    return `${pad2(D)}/${pad2(Mo)}/${Y}, ${pad2(H)}:${pad2(Mi)} IST`;
+  }
+  // fallback: parse & format as if it were IST
+  const d = parseDateFlexible(s);
+  return `${pad2(d.getDate())}/${pad2(d.getMonth()+1)}/${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())} IST`;
 }
 
 /* =======================
@@ -196,7 +219,30 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, font
   return y;
 }
 
-/** ====== REWRITTEN: Full invoice PDF with fixed zones, IST times, treads grid, non-overlap ====== */
+function parseTreadDepthsMap(maybe) {
+  if (!maybe) return null;
+  if (typeof maybe === "string") {
+    try { return JSON.parse(maybe); } catch { return null; }
+  }
+  if (typeof maybe === "object") return maybe;
+  return null;
+}
+function buildTreadLines(inv) {
+  const labels = fitmentSchema(inv.vehicle_type, inv.tyre_count || 0).labels;
+  const map = parseTreadDepthsMap(inv.tread_depths_json) || {};
+  const entries = labels.map(lbl => {
+    const key = Object.keys(map).find(k => k === lbl || k.split(" ×")[0] === lbl.split(" ×")[0]);
+    const val = key ? map[key] : null;
+    return `${lbl.split(" ×")[0]} – ${val != null && val !== "" ? `${val}mm` : "—"}`;
+  });
+  const lines = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    lines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
+  }
+  return lines;
+}
+
+/** ====== Full invoice PDF with fixed zones, IST times, treads grid, non-overlap ====== */
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const W = doc.internal.pageSize.getWidth();
@@ -204,8 +250,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   // Base metrics
   const M = 36;
-  const gapZ12 = 26;  // ↑ increased Zone 1 ↔ Zone 2 gap
-  const gapZ23 = 10;  // ↓ reduced Zone 2 ↔ Zone 3 gap
+  const gapZ12 = 26;  // Zone 1 ↔ Zone 2 gap
+  const gapZ23 = 10;  // Zone 2 ↔ Zone 3 gap
   const zoneGap = 12; // default small gap
   const lineH = 12;
 
@@ -222,14 +268,14 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, yLeft); yLeft += lineH;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, M, yLeft);
 
-  const createdDt = parseDateFlexible(inv.created_at || Date.now());
+  const createdDt = inv.created_at || Date.now();
   doc.text(`Invoice No: ${displayInvoiceCode(inv, profile)}`, W - M, headerTop, { align: "right" });
   doc.text(`Date: ${formatIST(createdDt)}`, W - M, headerTop + 16, { align: "right" });
 
   drawSeparator(doc, headerTop + 46, W, M);
 
   /** Zone 2 — Customer & Vehicle (left/right) */
-  let y = headerTop + 46 + gapZ12; // increased gap after Zone 1
+  let y = headerTop + 46 + gapZ12;
   doc.setFontSize(12); doc.text("Customer & Vehicle", M, y); doc.setFontSize(10.5);
   [
     `Name: ${inv.customer_name || ""}`,
@@ -243,30 +289,26 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const xR = W/2 + 10; let yR = y;
   doc.setFontSize(12); doc.text("Vehicle Details", xR, yR); doc.setFontSize(10.5);
 
-  // Build Fitment & Treads (mm) two-column lines from JSON (preferred)
-  const treadMap = (() => { try { return inv.tread_depths_json ? JSON.parse(inv.tread_depths_json) : null; } catch { return null; }})();
-  const treadLines = [];
-  if (treadMap && typeof treadMap === "object") {
-    const entries = Object.entries(treadMap).map(([k,v]) => `${k.split(" ×")[0]} – ${v}mm`);
-    for (let i=0;i<entries.length;i+=2) {
-      treadLines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
-    }
-  }
+  // Always show Fitment & Treads (mm)
+  const treadLines = buildTreadLines(inv); // robust JSON + fallback to schema
   const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml||0)/inv.tyre_count)/25)*25 : null;
   const rightItems = [
     `Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
-    ...(treadLines.length ? ["Fitment & Treads (mm):", ...treadLines] : []),
+    "Fitment & Treads (mm):",
+    ...treadLines,
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
   ].filter(Boolean);
   rightItems.forEach((t,i) => doc.text(t, xR, yR + 16 + i*lineH));
 
-  // Compute baseline for next zone (Zone 3) with reduced gap
-  const z2Bottom = Math.max(y + 16 + 6*lineH, yR + 16 + (rightItems.length)*lineH);
+  // Baseline for next zone (Zone 3)
+  const z2LeftH  = y + 16 + 6*lineH;
+  const z2RightH = yR + 16 + (rightItems.length)*lineH;
+  const z2Bottom = Math.max(z2LeftH, z2RightH);
   drawSeparator(doc, z2Bottom + gapZ23, W, M);
-  let yAfter = z2Bottom + gapZ23 + 6; // slight padding
+  let yAfter = z2Bottom + gapZ23 + 6;
 
   /** Zone 3 — Amounts table (recompute to be safe) */
   const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
@@ -288,7 +330,6 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
       ["MRP per ml", inrRs(Number(inv.price_per_ml || PRICE_PER_ML))],
       ["Gross (dosage × price)", inrRs(baseRaw)],
-      // labels changed to (Rs.) to avoid glyph issues
       ["Discount (Rs.)", `-${inrRs(discountUsed)}`],
       ["Installation Charges (Rs.)", inrRs(install)],
       ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
@@ -306,7 +347,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : yAfter + 140;
 
-  /** Mid‑install confirmation block (between Zone 3 & Zone 4, equidistant) */
+  /** Mid-install confirmation block (between Zone 3 & Zone 4, equidistant) */
   const midTitle = "Customer Mid-Install Confirmation";
   const midText = (() => {
     const when = inv.consent_signed_at ? formatIST(inv.consent_signed_at) : formatIST(inv.created_at || Date.now());
@@ -318,12 +359,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const blockTopPad = 10, blockBotPad = 10, blockSidePad = 10;
   const blockWidth = W - 2*M;
 
-  // We’ll compute equal spacing above/below by using a visual block with separators on both sides
   const z3Bottom = yAfter + zoneGap;
   drawSeparator(doc, z3Bottom, W, M);
   let yBlock = z3Bottom + zoneGap;
 
-  // Render the block
   doc.setFontSize(11); try { doc.setFont(undefined, "bold"); } catch {}
   doc.text(midTitle, M, yBlock); yBlock += 14; try { doc.setFont(undefined, "normal"); } catch {}
   doc.setDrawColor(220); doc.setLineWidth(0.8);
@@ -332,9 +371,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.setFontSize(10.5);
   midText.forEach(t => { doc.text(t, M + blockSidePad, yy); yy += 12; });
   yAfter = yBlock + blockTopPad + blockBotPad + (midText.length * 12);
-  // Now make the spacing to next zone equal to the spacing above (zoneGap)
   drawSeparator(doc, yAfter + zoneGap, W, M);
-  yAfter += zoneGap * 2; // zoneGap below + keep some air
+  yAfter += zoneGap * 2;
 
   /** Zone 4 — Customer Declaration */
   const maxW = W - M*2;
@@ -357,30 +395,35 @@ function generateInvoicePDF(inv, profile, taxMode) {
   drawSeparator(doc, yAfter + 6, W, M);
   yAfter += 6 + zoneGap;
 
-  /** Zone 6 — Signature boxes
-   *  Prefer bottom placement, but auto-lift to avoid overlap with prior content.
-   */
+  /** Zone 6 — Signature boxes (bottom-preferred; auto-lift to avoid overlap) */
   const boxWidth = 260, boxHeight = 66;
   const preferredBottomGap = 68;
   const bottomPreferredY = H - preferredBottomGap - boxHeight;
-  const nonOverlapY = Math.max(yAfter, M + 12); // ensure it's below prior content
-  const boxY = Math.max(bottomPreferredY, nonOverlapY); // if content is tall, lift the boxes up to avoid overlap
+  const nonOverlapY = Math.max(yAfter, M + 12);
+  const boxY = Math.max(bottomPreferredY, nonOverlapY);
 
-  // Installer box (left)
+  // Left box: Installer Signature & Stamp
+  doc.setDrawColor(0); doc.setLineWidth(0.8);
   doc.rect(M, boxY, boxWidth, boxHeight);
-  doc.setFontSize(10);
-  doc.text("Installer Sign & Stamp", M + 10, boxY + boxHeight + 14);
+  doc.setFontSize(10); doc.text("Installer Signature & Stamp", M + 10, boxY + 14);
+  // baseline to sign on
+  doc.line(M + 10, boxY + boxHeight - 14, M + boxWidth - 10, boxY + boxHeight - 14);
 
-  // Customer box (right) with signature image
+  // Right box: Customer Accepted & Confirmed
   const rightX = W - M - boxWidth;
   doc.rect(rightX, boxY, boxWidth, boxHeight);
-  doc.text("Customer Signature", rightX + 10, boxY + boxHeight + 14);
-  if (inv.customer_signature) {
-    try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, boxY + 8, 140, 44); } catch {}
-  }
+  doc.text("Customer Accepted & Confirmed", rightX + 10, boxY + 14);
+  // Signed at (IST)
   if (inv.signed_at) {
     doc.setFontSize(9.5);
-    doc.text(`Signed at: ${formatIST(inv.signed_at)}`, rightX + 10, boxY + boxHeight - 6);
+    doc.text(`Signed at: ${formatIST(inv.signed_at)}`, rightX + 10, boxY + boxHeight - 26);
+  }
+  // baseline
+  doc.line(rightX + 10, boxY + boxHeight - 14, rightX + boxWidth - 10, boxY + boxHeight - 14);
+
+  // Optional signature image (kept inside box)
+  if (inv.customer_signature) {
+    try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, boxY + 18, 140, 34); } catch {}
   }
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
@@ -700,7 +743,13 @@ function RecentInvoices({ token, profile }) {
     params.set("limit", "500");
 
     fetch(`${API_URL}/api/invoices?${params.toString()}`, { headers: headersAuth })
-      .then(r => r.json()).then(data => { setRows(Array.isArray(data)?data:[]); setLoading(false); })
+      .then(r => r.json()).then(data => {
+        const arr = Array.isArray(data) ? data : [];
+        // numeric sort by id DESC; tie-break by created_at
+        arr.sort((a,b) => (Number(b.id||0) - Number(a.id||0)) || ((new Date(b.created_at)) - (new Date(a.created_at))));
+        setRows(arr);
+        setLoading(false);
+      })
       .catch(() => { setError("Could not load invoices"); setLoading(false); });
 
     fetch(`${API_URL}/api/summary?${params.toString()}`, { headers: headersAuth })
@@ -713,13 +762,20 @@ function RecentInvoices({ token, profile }) {
   async function exportCsv() {
     try {
       const params = new URLSearchParams(); if (q) params.set("q", q); if (from) params.set("from", from); if (to) params.set("to", to);
-      const res = await fetch(`${API_URL}/api/invoices/export?${params.toString()}`);
-      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const res = await fetch(`${API_URL}/api/invoices/export?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}`, "x-api-key": API_KEY }
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>"(no body)");
+        throw new Error(`Export failed (${res.status}) — ${txt}`);
+      }
       const blob = await res.blob(); const a = document.createElement("a"); const url = URL.createObjectURL(blob);
       const disp = res.headers.get("Content-Disposition") || "";
       const name = disp.includes("filename=") ? disp.split('filename="')[1]?.split('"')[0] || "invoices.csv" : "invoices.csv";
       a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    } catch { alert("Export failed"); }
+    } catch (e) {
+      alert(String(e));
+    }
   }
 
   async function printPdfFor(id) {
@@ -736,7 +792,7 @@ function RecentInvoices({ token, profile }) {
   return (
     <div style={{ marginTop: 24, fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' }}>
       <h2>Invoices</h2>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10, border: "1px solid #eee", padding: 8, borderRadius: 6 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10, border: "1px solid "#eee", padding: 8, borderRadius: 6 }}>
         <input placeholder="Search name or vehicle no." value={q} onChange={e=>setQ(e.target.value)} style={{ flex: 1, minWidth: 280 }} />
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
           From: <input type="date" value={from} onChange={e=>setFrom(e.target.value)} />
@@ -854,7 +910,7 @@ function FranchiseeApp({ token, onLogout }) {
 
   // Validation helpers
   const sizeErrors = (() => {
-    const errs = {};
+       const errs = {};
     const w = num(tyreWidth), a = num(aspectRatio), r = num(rimDiameter);
     if (!(w >= SIZE_LIMITS.widthMin && w <= SIZE_LIMITS.widthMax)) errs.width = `Width must be ${SIZE_LIMITS.widthMin}–${SIZE_LIMITS.widthMax} mm`;
     if (!(a >= SIZE_LIMITS.aspectMin && a <= SIZE_LIMITS.aspectMax)) errs.aspect = `Aspect must be ${SIZE_LIMITS.aspectMin}–${SIZE_LIMITS.aspectMax}%`;
