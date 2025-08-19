@@ -1,4 +1,4 @@
-// src/App.js — Stable build with validation, consent → confirm flow, IST time, no watermark
+// src/App.js — Consent → Review & Confirm (with manual override), per-tyre outlier checks, IST time, no watermark
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -7,27 +7,30 @@ import "jspdf-autotable";
    App / Backend Config
    ======================= */
 const API_URL = process.env.REACT_APP_API_BASE_URL || "https://maxtt-billing-api.onrender.com";
-const API_KEY = "supersecret123"; // frontend key (your backend also checks its own server key)
+const API_KEY = "supersecret123"; // frontend key (backend also checks its own server key)
 const IST_TZ = "Asia/Kolkata";
 
-// Pricing policy
-const PRICE_PER_ML = 4.5;      // fixed
-const GST_PERCENT  = 18;       // fixed
-const DISCOUNT_MAX_PCT = 30;   // hard cap of (dosage × price)
+// Pricing policy (fixed)
+const PRICE_PER_ML = 4.5;
+const GST_PERCENT  = 18;
+const DISCOUNT_MAX_PCT = 30;
 
-// Thresholds for outlier warnings (need manual installer confirmation)
-const OUTLIER_LIMITS = {
-  "2-Wheeler (Scooter/Motorcycle)": 900,
-  "3-Wheeler (Auto)":               1200,
-  "4-Wheeler (Passenger Car/Van/SUV)": 1500,
-  "6-Wheeler (Bus/LTV)":            3500,
-  "HTV (>6 wheels: Trucks/Trailers/Mining)": 3500
+// Strict size validation limits (hard blocks)
+const SIZE_LIMITS = { widthMin: 90, widthMax: 445, aspectMin: 25, aspectMax: 95, rimMin: 8, rimMax: 25 };
+
+// Per-tyre outlier thresholds (yellow/red) — SOFT checks (confirm / double-confirm)
+const OUTLIER_THRESHOLDS = {
+  "2-Wheeler (Scooter/Motorcycle)":          { yellow: 750,   red: 1500 },
+  "3-Wheeler (Auto)":                        { yellow: 500,   red: 1200 },
+  "4-Wheeler (Passenger Car/Van/SUV)":       { yellow: 1300,  red: 2000 },
+  "6-Wheeler (Bus/LTV)":                     { yellow: 3500,  red: 6000 },
+  "HTV (>6 wheels: Trucks/Trailers/Mining)": { yellow: 10000, red: 30000 },
 };
 
 // Vehicle dosage constants + tyre options
 const VEHICLE_CFG = {
-  "2-Wheeler (Scooter/Motorcycle)": { k: 2.6, bufferPct: 0.03, defaultTyres: 2, options: [2] },
-  "3-Wheeler (Auto)":               { k: 2.2, bufferPct: 0.03, defaultTyres: 3, options: [3] },
+  "2-Wheeler (Scooter/Motorcycle)": { k: 2.6,  bufferPct: 0.03, defaultTyres: 2, options: [2] },
+  "3-Wheeler (Auto)":               { k: 2.2,  bufferPct: 0.03, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   "6-Wheeler (Bus/LTV)":            { k: 3.0,  bufferPct: 0.05, defaultTyres: 6, options: [6] },
   "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.0, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18] }
@@ -143,7 +146,7 @@ function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
 }
 
 /* =======================
-   Invoice code helpers
+   Invoice / Display helpers
    ======================= */
 const INDIA_STATE_ABBR = {
   "JAMMU AND KASHMIR":"JK","HIMACHAL PRADESH":"HP","PUNJAB":"PB","CHANDIGARH":"CH","UTTARAKHAND":"UT",
@@ -247,7 +250,6 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ].filter(Boolean);
   rightItems.forEach((t,i) => doc.text(t, xR, yR + 16 + i*14));
 
-  /* Equal spacing separator */
   drawSeparator(doc, y + 150, W, M);
   let yAfter = y + 165;
 
@@ -449,35 +451,83 @@ function SignaturePad({ open, onClose, onSave }) {
 }
 
 /* =======================
-   Confirmation Modal (installer review)
+   Confirmation Modal (installer review + manual override)
    ======================= */
+function computeOutlierLevel(perTyreMl, vehicleType) {
+  const t = OUTLIER_THRESHOLDS[vehicleType];
+  if (!t) return "none";
+  if (perTyreMl > t.red) return "red";
+  if (perTyreMl > t.yellow) return "yellow";
+  return "none";
+}
 function ConfirmationModal({ open, onClose, onConfirm, data }) {
+  const [useManual, setUseManual] = useState(false);
+  const [manualPerTyre, setManualPerTyre] = useState("");
+  const [chartVersion, setChartVersion] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
+  const [overrideNote, setOverrideNote] = useState("");
+  const [overrideAck, setOverrideAck] = useState(false);
+  const [doubleConfirm, setDoubleConfirm] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setUseManual(false);
+      setManualPerTyre("");
+      setChartVersion("");
+      setOverrideReason("");
+      setOverrideNote("");
+      setOverrideAck(false);
+      setDoubleConfirm(false);
+    }
+  }, [open]);
+
   if (!open) return null;
   const {
     vehicleType, tyreCount, tyreWidth, aspectRatio, rimDiameter,
     perTyreMl, totalMl, baseRaw, discountUsed, installation,
-    mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand,
-    outlierWarning
+    mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand
   } = data || {};
+
+  // Outlier levels
+  const computedLevel = computeOutlierLevel(perTyreMl, vehicleType);
+
+  const manualVal = Number(manualPerTyre || 0);
+  const manualLevel = useManual ? computeOutlierLevel(manualVal, vehicleType) : "none";
+  const levelUsed = useManual ? manualLevel : computedLevel;
+
+  const levelBanner = levelUsed === "red"
+    ? { bg: "#fdecea", bd: "#f5c2c0", icon: "⛔", text: "Extreme dosage for this vehicle class. Double-confirmation required to proceed." }
+    : levelUsed === "yellow"
+      ? { bg: "#fff8e1", bd: "#ffe08a", icon: "⚠️", text: "Unusual dosage for this vehicle class. Please review carefully before saving." }
+      : null;
+
+  const finalPerTyre = useManual ? manualVal : perTyreMl;
+  const finalTotal   = finalPerTyre * Number(tyreCount || 0);
+
+  // share text
   const shareText =
 `MaxTT Invoice (preview)
 Vehicle: ${vehicleType}, Tyres: ${tyreCount}
 Size: ${tyreWidth}/${aspectRatio} R${rimDiameter}
-Dosage per tyre: ${perTyreMl} ml
-Total dosage: ${totalMl} ml
+Dosage per tyre: ${finalPerTyre} ml
+Total dosage: ${finalTotal} ml
 Amount before GST: ${inrRs(amountBeforeTax)}
 GST: ${inrRs(gstTotal)}
 Grand Total: ${inrRs(grand)}
 Tax Mode: ${mode}`;
 
+  const canConfirm =
+    (!useManual || (manualVal > 0 && overrideReason && chartVersion && overrideAck)) &&
+    (levelUsed !== "red" || doubleConfirm);
+
   return (
     <div style={modalWrap}>
-      <div style={{ ...modalBox, maxWidth: 760, fontFamily: '"Poppins",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif' }}>
-        <h3 style={{ marginTop: 0 }}>Confirm Values Before Save</h3>
+      <div style={{ ...modalBox, maxWidth: 820, fontFamily: '"Poppins",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif' }}>
+        <h3 style={{ marginTop: 0 }}>Review & Confirm Before Save</h3>
 
-        {outlierWarning && (
-          <div style={{ background: "#fff3cd", border: "1px solid #ffe08a", padding: 10, borderRadius: 6, marginBottom: 10 }}>
-            ⚠️ <strong>Unusual values detected:</strong> {outlierWarning}
+        {levelBanner && (
+          <div style={{ background: levelBanner.bg, border: `1px solid ${levelBanner.bd}`, padding: 10, borderRadius: 6, marginBottom: 10 }}>
+            {levelBanner.icon} <strong>{levelBanner.text}</strong>
           </div>
         )}
 
@@ -485,8 +535,8 @@ Tax Mode: ${mode}`;
           <div><strong>Vehicle Category:</strong> {vehicleType}</div>
           <div><strong>Tyres:</strong> {tyreCount}</div>
           <div><strong>Tyre Size:</strong> {tyreWidth}/{aspectRatio} R{rimDiameter}</div>
-          <div><strong>Per-tyre Dosage:</strong> {perTyreMl} ml</div>
-          <div><strong>Total Dosage:</strong> {totalMl} ml</div>
+          <div><strong>Per-tyre Dosage (computed):</strong> {perTyreMl} ml</div>
+          <div><strong>Total Dosage (computed):</strong> {totalMl} ml</div>
           <div><strong>Gross (dosage × price):</strong> {inrRs(baseRaw)}</div>
           <div><strong>Discount:</strong> -{inrRs(discountUsed)}</div>
           <div><strong>Installation:</strong> {inrRs(installation)}</div>
@@ -495,13 +545,84 @@ Tax Mode: ${mode}`;
           <div><strong>Grand Total:</strong> {inrRs(grand)}</div>
         </div>
 
+        {/* Manual override */}
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px dashed #ddd" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" checked={useManual} onChange={(e)=>{ setUseManual(e.target.checked); setDoubleConfirm(false); }} />
+            <strong>Use manual dosage per tyre (from official chart)</strong>
+          </label>
+
+          {useManual && (
+            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <label>Per-tyre dosage (ml)</label>
+                <input value={manualPerTyre} onChange={e=>setManualPerTyre(e.target.value.replace(/[^\d.]/g,""))}
+                       placeholder={`${perTyreMl}`} />
+                {manualVal <= 0 && <div style={{ color: "crimson", fontSize: 12 }}>Enter a valid number &gt; 0</div>}
+              </div>
+              <div>
+                <label>Chart/version</label>
+                <input value={chartVersion} onChange={e=>setChartVersion(e.target.value)} placeholder="e.g., Chart v3 / Aug 2025" />
+              </div>
+              <div>
+                <label>Reason</label>
+                <select value={overrideReason} onChange={e=>setOverrideReason(e.target.value)}>
+                  <option value="">Select…</option>
+                  <option>Odd tyre size</option>
+                  <option>Vintage vehicle</option>
+                  <option>EV-specific</option>
+                  <option>Formula mismatch</option>
+                  <option>Emergency completion</option>
+                  <option>Other</option>
+                </select>
+              </div>
+              <div>
+                <label>Note (optional)</label>
+                <input value={overrideNote} onChange={e=>setOverrideNote(e.target.value)} placeholder="Short note…" />
+              </div>
+              <label style={{ gridColumn: "1 / span 2", display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+                <input type="checkbox" checked={overrideAck} onChange={(e)=>setOverrideAck(e.target.checked)} />
+                I confirm this manual value is taken from the official chart.
+              </label>
+              {/* Manual outlier indicator */}
+              {manualLevel !== "none" && (
+                <div style={{ gridColumn: "1 / span 2", fontSize: 12, color: manualLevel==="red" ? "#a40000" : "#7a5900" }}>
+                  Manual dosage is {manualLevel.toUpperCase()} outlier for {vehicleType}.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Double-confirm for RED outliers */}
+        {levelUsed === "red" && (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, background: "#fdecea", border: "1px solid #f5c2c0", padding: 8, borderRadius: 6 }}>
+            <input type="checkbox" checked={doubleConfirm} onChange={(e)=>setDoubleConfirm(e.target.checked)} />
+            I understand this is an **extreme** dosage value and still confirm it is correct.
+          </label>
+        )}
+
         <div style={{ marginTop: 10, fontSize: 12, color: "#555" }}>
           A share preview will be available after save (Email / WhatsApp – text only).
         </div>
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-          <button onClick={onClose}>Back</button>
-          <button onClick={() => onConfirm({ shareText })} style={{ background: "#0a7", color: "#fff", border: "none", padding: "6px 12px", borderRadius: 6 }}>
+          <button onClick={onClose}>Back & Edit</button>
+          <button
+            onClick={() => onConfirm({
+              shareText,
+              useManual,
+              manualPerTyre: useManual ? manualVal : null,
+              outlier_level: levelUsed,
+              override_reason: useManual ? overrideReason : null,
+              override_chart_version: useManual ? chartVersion : null,
+              override_note: useManual ? overrideNote : null,
+              computed_per_tyre: perTyreMl,
+              computed_total: totalMl
+            })}
+            disabled={!canConfirm}
+            style={{ background: canConfirm ? "#0a7" : "#8fa", color: "#fff", border: "none", padding: "6px 12px", borderRadius: 6 }}
+          >
             Confirm & Save
           </button>
         </div>
@@ -541,7 +662,7 @@ function RecentInvoices({ token, profile }) {
   async function exportCsv() {
     try {
       const params = new URLSearchParams(); if (q) params.set("q", q); if (from) params.set("from", from); if (to) params.set("to", to);
-      const res = await fetch(`${API_URL}/api/exports/invoices?${params.toString()}`);
+      const res = await fetch(`${API_URL}/api/invoices/export?${params.toString()}`);
       if (!res.ok) throw new Error(`Export failed (${res.status})`);
       const blob = await res.blob(); const a = document.createElement("a"); const url = URL.createObjectURL(blob);
       const disp = res.headers.get("Content-Disposition") || "";
@@ -684,19 +805,12 @@ function FranchiseeApp({ token, onLogout }) {
   const sizeErrors = (() => {
     const errs = {};
     const w = num(tyreWidth), a = num(aspectRatio), r = num(rimDiameter);
-    if (!(w >= 90 && w <= 445)) errs.width = "Width must be 90–445 mm";
-    if (!(a >= 25 && a <= 95))  errs.aspect = "Aspect must be 25–95%";
-    if (!(r >= 8 && r <= 25))   errs.rim = "Rim must be 8–25 inches";
+    if (!(w >= SIZE_LIMITS.widthMin && w <= SIZE_LIMITS.widthMax)) errs.width = `Width must be ${SIZE_LIMITS.widthMin}–${SIZE_LIMITS.widthMax} mm`;
+    if (!(a >= SIZE_LIMITS.aspectMin && a <= SIZE_LIMITS.aspectMax)) errs.aspect = `Aspect must be ${SIZE_LIMITS.aspectMin}–${SIZE_LIMITS.aspectMax}%`;
+    if (!(r >= SIZE_LIMITS.rimMin && r <= SIZE_LIMITS.rimMax)) errs.rim = `Rim must be ${SIZE_LIMITS.rimMin}–${SIZE_LIMITS.rimMax} inches`;
     return errs;
   })();
 
-  function outlierMessage(totalMl) {
-    const limit = OUTLIER_LIMITS[vehicleType] ?? 0;
-    if (limit && totalMl > limit) return `Total dosage ${totalMl} ml exceeds the typical limit of ${limit} ml for ${vehicleType}. Please review.`;
-    return "";
-  }
-
-  // UI handlers
   function onVehicleTypeChange(v) {
     setVehicleType(v);
     const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
@@ -727,14 +841,17 @@ function FranchiseeApp({ token, onLogout }) {
     } catch { alert("Network error while saving invoice"); return null; }
   }
 
-  // Main flow: click → ensure consent → show confirm → save → PDF + share
-  const handleCalculateAndSave = async () => {
-    // Strict size validation
-    if (sizeErrors.width || sizeErrors.aspect || sizeErrors.rim) {
-      alert("Please fix tyre size fields before continuing."); return;
-    }
+  function outlierMessage(perTyre) {
+    const t = OUTLIER_THRESHOLDS[vehicleType];
+    if (!t) return "";
+    if (perTyre > t.red) return `Per-tyre ${perTyre} ml is an EXTREME outlier (> ${t.red} ml) for ${vehicleType}.`;
+    if (perTyre > t.yellow) return `Per-tyre ${perTyre} ml is an unusual value (> ${t.yellow} ml) for ${vehicleType}.`;
+    return "";
+  }
 
-    // Required base fields
+  // Main flow: click → ensure consent → review modal → save → PDF + share
+  const handleCalculateAndReview = async () => {
+    if (sizeErrors.width || sizeErrors.aspect || sizeErrors.rim) { alert("Please fix tyre size fields before continuing."); return; }
     if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number."); return; }
 
     // Per-tyre tread validation
@@ -749,13 +866,12 @@ function FranchiseeApp({ token, onLogout }) {
     // Capture consent/signature first if missing
     if (!signatureData) { setSigOpen(true); return; }
 
-    // Compute pricing
-    const perTyreMl = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
-    const tCount = parseInt(tyreCount || "0", 10);
-    if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
-    const totalMl = perTyreMl * tCount;
+    // Compute pricing from computed dosage (manual override happens in modal)
+    const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
+    const tCount = parseInt(tyreCount || "0", 10); if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
+    const total = perTyre * tCount;
 
-    const baseRaw = totalMl * PRICE_PER_ML;
+    const baseRaw = total * PRICE_PER_ML;
     const maxDiscount = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
     const enteredDiscount = Math.max(0, Math.round(num(discountInr)));
     const discountUsed = Math.min(enteredDiscount, maxDiscount);
@@ -768,32 +884,63 @@ function FranchiseeApp({ token, onLogout }) {
     const gstTotal = cgst + sgst + igst;
     const grand = amountBeforeTax + gstTotal;
 
-    // Outlier warning message (soft block; requires confirm)
-    const warnMsg = outlierMessage(totalMl);
-
     // Fill confirmation data
     confirmRef.current = {
       vehicleType, tyreCount, tyreWidth, aspectRatio, rimDiameter,
-      perTyreMl, totalMl, baseRaw, discountUsed, installation,
-      mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand,
-      outlierWarning: warnMsg || ""
+      perTyreMl: perTyre, totalMl: total, baseRaw, discountUsed, installation,
+      mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand
     };
     setConfirmOpen(true);
   };
 
-  async function finalizeSave({ shareText }) {
+  async function finalizeSave({
+    shareText,
+    useManual,
+    manualPerTyre,
+    outlier_level,
+    override_reason,
+    override_chart_version,
+    override_note,
+    computed_per_ty re, // prevent accidental typo: we do not use this variable
+    computed_per_tyre,
+    computed_total
+  }) {
     setConfirmOpen(false);
 
-    // Consent snapshot
-    const consentSnapshot = "Customer Consent to Proceed: Informed of process, pricing and GST; consents to installation and undertakes to pay upon completion.";
+    const tCount = parseInt(tyreCount || "0", 10);
+    const perTyreUsed = useManual ? Number(manualPerTyre || 0) : Number(confirmRef.current.perTyreMl || 0);
+    const totalUsed   = perTyreUsed * tCount;
+
+    // Recompute totals with the used dosage
+    const baseRaw = totalUsed * PRICE_PER_ML;
+    const maxDiscount = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
+    const discountUsed = Math.min(Math.max(0, Math.round(num(discountInr))), maxDiscount);
+    const installation = Math.max(0, Math.round(num(installationFeeInr)));
+    const amountBeforeTax = Math.max(0, baseRaw - discountUsed + installation);
+    const mode = taxMode === "IGST" ? "IGST" : "CGST_SGST";
+    const cgst = mode==="CGST_SGST" ? (amountBeforeTax * GST_PERCENT)/200 : 0;
+    const sgst = mode==="CGST_SGST" ? (amountBeforeTax * GST_PERCENT)/200 : 0;
+    const igst = mode==="IGST" ? (amountBeforeTax * GST_PERCENT)/100 : 0;
+    const gstTotal = cgst + sgst + igst;
+    const grand = amountBeforeTax + gstTotal;
+
+    // Consent snapshot + AUDIT (fallback store for override & outlier details)
+    const consentSnapshotBase =
+      "Customer Consent to Proceed: Informed of process, pricing and GST; consents to installation and undertakes to pay upon completion.";
+    const audit = {
+      outlier_level,
+      computed_per_tyre_ml: computed_per_tyre,
+      computed_total_ml: computed_total,
+      override_used: !!useManual,
+      override_per_tyre_ml: useManual ? perTyreUsed : null,
+      override_total_ml: useManual ? totalUsed : null,
+      override_reason: useManual ? override_reason : null,
+      override_chart_version: useManual ? override_chart_version : null,
+      override_note: useManual ? override_note : null
+    };
+    const consentSnapshot = `${consentSnapshotBase}\n[AUDIT] ${JSON.stringify(audit)}`;
     const consentSignedAt = (consentMeta && consentMeta.agreedAt) || new Date().toISOString();
 
-    const {
-      perTyreMl, totalMl, baseRaw, discountUsed, installation,
-      mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand
-    } = confirmRef.current;
-
-    const tCount = parseInt(tyreCount || "0", 10);
     const saved = await saveInvoiceToServer({
       // Customer & Vehicle
       customer_name: customerName,
@@ -815,13 +962,13 @@ function FranchiseeApp({ token, onLogout }) {
       tread_depth_mm: Math.min(...Object.values(treadByTyre).map(v => num(v, 0))),
       tread_depths_json: JSON.stringify(treadByTyre),
 
-      // Dosage
-      dosage_ml: totalMl,
+      // Dosage (USED — computed or manual)
+      dosage_ml: totalUsed,
 
       // GSTIN (optional)
       customer_gstin: gstin || null,
 
-      // Pricing & Tax
+      // Pricing & Tax (USED)
       price_per_ml: PRICE_PER_ML,
       discount: discountUsed,
       installation_fee: installation,
@@ -857,8 +1004,6 @@ function FranchiseeApp({ token, onLogout }) {
       const body = encodeURIComponent(shareText);
       const mailto = `mailto:?subject=${subject}&body=${body}`;
       const wa = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
-
-      // simple prompt with share links
       const share = window.confirm("Open Email/WhatsApp share text?\n\nPress OK for Email, Cancel for WhatsApp.");
       if (share) { window.location.href = mailto; } else { window.open(wa, "_blank"); }
 
@@ -982,7 +1127,7 @@ function FranchiseeApp({ token, onLogout }) {
         <div style={{ background: "#f7faf7", border: "1px solid #d8eed8", padding: 8, borderRadius: 6, marginTop: 10 }}>
           <strong>Live Dosage Preview:</strong> &nbsp; Per-tyre <strong>{livePerTyre} ml</strong> &nbsp; | &nbsp; Total <strong>{liveTotal} ml</strong>
           {(() => {
-            const msg = outlierMessage(liveTotal);
+            const msg = outlierMessage(livePerTyre);
             return msg ? <span style={{ color:"#a05a00", marginLeft: 10 }}>⚠ {msg}</span> : null;
           })()}
         </div>
@@ -1017,7 +1162,7 @@ function FranchiseeApp({ token, onLogout }) {
         </div>
       </div>
 
-      {/* Consent + Confirm buttons */}
+      {/* Consent + Review buttons */}
       {!signatureData ? (
         <button onClick={() => setSigOpen(true)} style={{ marginRight: 8 }}>
           Capture Customer Signature (Consent)
@@ -1025,8 +1170,8 @@ function FranchiseeApp({ token, onLogout }) {
       ) : (
         <span style={{ marginRight: 12, color: "green" }}>Signature & consent ✓</span>
       )}
-      <button onClick={handleCalculateAndSave} disabled={hasSizeError}>
-        Calculate → Confirm → Save (Auto PDF)
+      <button onClick={handleCalculateAndReview} disabled={hasSizeError}>
+        Review → Confirm → Save (Auto PDF)
       </button>
       {hasSizeError && <div style={{ color: "crimson", marginTop: 6 }}>Fix tyre size errors to continue.</div>}
 
@@ -1037,7 +1182,7 @@ function FranchiseeApp({ token, onLogout }) {
       <SignaturePad
         open={sigOpen}
         onClose={() => setSigOpen(false)}
-        onSave={({ dataUrl, consent }) => { setSignatureData(dataUrl); setConsentMeta(consent || null); setSigOpen(false); /* immediately proceed to confirm next click */ }}
+        onSave={({ dataUrl, consent }) => { setSignatureData(dataUrl); setConsentMeta(consent || null); setSigOpen(false); }}
       />
       <ConfirmationModal
         open={confirmOpen}
