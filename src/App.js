@@ -8,7 +8,6 @@ import "jspdf-autotable";
    ======================= */
 const API_URL = process.env.REACT_APP_API_BASE_URL || "https://maxtt-billing-api.onrender.com";
 const API_KEY = "supersecret123"; // frontend key (backend also checks its own server key)
-const IST_TZ = "Asia/Kolkata";
 
 // Pricing policy (fixed)
 const PRICE_PER_ML = 4.5;
@@ -196,30 +195,41 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, font
   });
   return y;
 }
+
+/** ====== REWRITTEN: Full invoice PDF with fixed zones, IST times, treads grid, non-overlap ====== */
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const W = doc.internal.pageSize.getWidth();
   const H = doc.internal.pageSize.getHeight();
-  const M = 36;
-  const zoneGap = 12;  // equal gap between zones
-  doc.setFont("helvetica","normal");
 
-  /* Zone 1 — Franchisee header */
-  doc.setFontSize(15); doc.text(profile?.name || "Franchisee", M, 40);
+  // Base metrics
+  const M = 36;
+  const gapZ12 = 26;  // ↑ increased Zone 1 ↔ Zone 2 gap
+  const gapZ23 = 10;  // ↓ reduced Zone 2 ↔ Zone 3 gap
+  const zoneGap = 12; // default small gap
+  const lineH = 12;
+
+  doc.setFont("helvetica", "normal");
+
+  /** Zone 1 — Franchisee header */
+  const headerTop = 40;
+  doc.setFontSize(15);
+  doc.text(profile?.name || "Franchisee", M, headerTop);
   doc.setFontSize(10.5);
   const addrLines = String(profile?.address || "Address not set").split(/\n|, /g).filter(Boolean);
-  addrLines.slice(0,3).forEach((t,i) => doc.text(t, M, 56 + i*12));
-  let y = 56 + addrLines.length*12 + 2;
-  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, y); y += 12;
-  doc.text(`GSTIN: ${profile?.gstin || ""}`, M, y);
-  const created = parseDateFlexible(inv.created_at || Date.now());
-  doc.text(`Invoice No: ${displayInvoiceCode(inv, profile)}`, W - M, 40, { align: "right" });
-  doc.text(`Date: ${formatIST(created)}`, W - M, 56, { align: "right" });
+  addrLines.slice(0,3).forEach((t,i) => doc.text(t, M, headerTop + 16 + i*lineH));
+  let yLeft = headerTop + 16 + addrLines.length*lineH + 2;
+  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, yLeft); yLeft += lineH;
+  doc.text(`GSTIN: ${profile?.gstin || ""}`, M, yLeft);
 
-  drawSeparator(doc, 86, W, M);
-  y = 100;
+  const createdDt = parseDateFlexible(inv.created_at || Date.now());
+  doc.text(`Invoice No: ${displayInvoiceCode(inv, profile)}`, W - M, headerTop, { align: "right" });
+  doc.text(`Date: ${formatIST(createdDt)}`, W - M, headerTop + 16, { align: "right" });
 
-  /* Zone 2 — Customer & Vehicle (left/right) */
+  drawSeparator(doc, headerTop + 46, W, M);
+
+  /** Zone 2 — Customer & Vehicle (left/right) */
+  let y = headerTop + 46 + gapZ12; // increased gap after Zone 1
   doc.setFontSize(12); doc.text("Customer & Vehicle", M, y); doc.setFontSize(10.5);
   [
     `Name: ${inv.customer_name || ""}`,
@@ -228,32 +238,37 @@ function generateInvoicePDF(inv, profile, taxMode) {
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
-  ].forEach((t,i) => doc.text(t, M, y + 16 + i*14));
+  ].forEach((t,i) => doc.text(t, M, y + 16 + i*lineH));
 
   const xR = W/2 + 10; let yR = y;
   doc.setFontSize(12); doc.text("Vehicle Details", xR, yR); doc.setFontSize(10.5);
+
+  // Build Fitment & Treads (mm) two-column lines from JSON (preferred)
   const treadMap = (() => { try { return inv.tread_depths_json ? JSON.parse(inv.tread_depths_json) : null; } catch { return null; }})();
-  const lines = [];
+  const treadLines = [];
   if (treadMap && typeof treadMap === "object") {
     const entries = Object.entries(treadMap).map(([k,v]) => `${k.split(" ×")[0]} – ${v}mm`);
-    for (let i=0;i<entries.length;i+=2) lines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
+    for (let i=0;i<entries.length;i+=2) {
+      treadLines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
+    }
   }
   const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml||0)/inv.tyre_count)/25)*25 : null;
   const rightItems = [
     `Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
-    (lines.length ? "Fitment & Treads (mm):" : (inv.tread_depth_mm!=null ? `Min Tread: ${inv.tread_depth_mm} mm` : "")),
-    ...lines,
+    ...(treadLines.length ? ["Fitment & Treads (mm):", ...treadLines] : []),
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
   ].filter(Boolean);
-  rightItems.forEach((t,i) => doc.text(t, xR, yR + 16 + i*14));
+  rightItems.forEach((t,i) => doc.text(t, xR, yR + 16 + i*lineH));
 
-  drawSeparator(doc, y + 150, W, M);
-  let yAfter = y + 165;
+  // Compute baseline for next zone (Zone 3) with reduced gap
+  const z2Bottom = Math.max(y + 16 + 6*lineH, yR + 16 + (rightItems.length)*lineH);
+  drawSeparator(doc, z2Bottom + gapZ23, W, M);
+  let yAfter = z2Bottom + gapZ23 + 6; // slight padding
 
-  /* Zone 3 — Amounts table (recompute to be safe) */
+  /** Zone 3 — Amounts table (recompute to be safe) */
   const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
   const maxDisc = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
   const discountUsed = Math.min(Number(inv.discount || 0), maxDisc);
@@ -273,8 +288,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
       ["MRP per ml", inrRs(Number(inv.price_per_ml || PRICE_PER_ML))],
       ["Gross (dosage × price)", inrRs(baseRaw)],
-      ["Discount (₹)", `-${inrRs(discountUsed)}`],
-      ["Installation Charges (₹)", inrRs(install)],
+      // labels changed to (Rs.) to avoid glyph issues
+      ["Discount (Rs.)", `-${inrRs(discountUsed)}`],
+      ["Installation Charges (Rs.)", inrRs(install)],
       ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
       ["CGST (9%)", inrRs(cgst)],
       ["SGST (9%)", inrRs(sgst)],
@@ -288,10 +304,39 @@ function generateInvoicePDF(inv, profile, taxMode) {
     margin: { left: M, right: M }
   });
 
-  yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + zoneGap : yAfter + 140;
-  drawSeparator(doc, yAfter, W, M); yAfter += zoneGap;
+  yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : yAfter + 140;
 
-  /* Zone 4 — Customer Declaration */
+  /** Mid‑install confirmation block (between Zone 3 & Zone 4, equidistant) */
+  const midTitle = "Customer Mid-Install Confirmation";
+  const midText = (() => {
+    const when = inv.consent_signed_at ? formatIST(inv.consent_signed_at) : formatIST(inv.created_at || Date.now());
+    return [
+      `Customer consent to proceed was captured and recorded.`,
+      `Consent timestamp: ${when}`
+    ];
+  })();
+  const blockTopPad = 10, blockBotPad = 10, blockSidePad = 10;
+  const blockWidth = W - 2*M;
+
+  // We’ll compute equal spacing above/below by using a visual block with separators on both sides
+  const z3Bottom = yAfter + zoneGap;
+  drawSeparator(doc, z3Bottom, W, M);
+  let yBlock = z3Bottom + zoneGap;
+
+  // Render the block
+  doc.setFontSize(11); try { doc.setFont(undefined, "bold"); } catch {}
+  doc.text(midTitle, M, yBlock); yBlock += 14; try { doc.setFont(undefined, "normal"); } catch {}
+  doc.setDrawColor(220); doc.setLineWidth(0.8);
+  doc.rect(M, yBlock, blockWidth, blockTopPad + blockBotPad + (midText.length * 12));
+  let yy = yBlock + blockTopPad + 2;
+  doc.setFontSize(10.5);
+  midText.forEach(t => { doc.text(t, M + blockSidePad, yy); yy += 12; });
+  yAfter = yBlock + blockTopPad + blockBotPad + (midText.length * 12);
+  // Now make the spacing to next zone equal to the spacing above (zoneGap)
+  drawSeparator(doc, yAfter + zoneGap, W, M);
+  yAfter += zoneGap * 2; // zoneGap below + keep some air
+
+  /** Zone 4 — Customer Declaration */
   const maxW = W - M*2;
   const declItems = [
     "I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
@@ -299,9 +344,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
     "I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions."
   ];
   yAfter = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter, maxW, 11, 9.0);
-  drawSeparator(doc, yAfter + 6, W, M); yAfter += zoneGap + 6;
+  drawSeparator(doc, yAfter + 6, W, M);
+  yAfter += 6 + zoneGap;
 
-  /* Zone 5 — Terms & Conditions */
+  /** Zone 5 — Terms & Conditions */
   const termsItems = [
     "The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
     "Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
@@ -309,18 +355,23 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter, maxW, 11, 9.0);
   drawSeparator(doc, yAfter + 6, W, M);
+  yAfter += 6 + zoneGap;
 
-  /* Zone 6 — Signature boxes, fixed from bottom */
+  /** Zone 6 — Signature boxes
+   *  Prefer bottom placement, but auto-lift to avoid overlap with prior content.
+   */
   const boxWidth = 260, boxHeight = 66;
-  const bottomGap = 68;
-  const boxY = H - bottomGap - boxHeight;
+  const preferredBottomGap = 68;
+  const bottomPreferredY = H - preferredBottomGap - boxHeight;
+  const nonOverlapY = Math.max(yAfter, M + 12); // ensure it's below prior content
+  const boxY = Math.max(bottomPreferredY, nonOverlapY); // if content is tall, lift the boxes up to avoid overlap
 
-  // Installer
+  // Installer box (left)
   doc.rect(M, boxY, boxWidth, boxHeight);
   doc.setFontSize(10);
   doc.text("Installer Sign & Stamp", M + 10, boxY + boxHeight + 14);
 
-  // Customer with captured signature inside the box
+  // Customer box (right) with signature image
   const rightX = W - M - boxWidth;
   doc.rect(rightX, boxY, boxWidth, boxHeight);
   doc.text("Customer Signature", rightX + 10, boxY + boxHeight + 14);
