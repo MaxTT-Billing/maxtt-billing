@@ -1,4 +1,4 @@
-// src/App.js — Base Layout v1 (locked): Poppins + fixed ₹/ml + SGST/CGST/IGST + discount cap + per-tyre tread + consent + IST + CSV
+// src/App.js — Base Layout v1 (locked): Poppins + fixed ₹/ml + SGST/CGST/IGST + discount cap + per-tyre tread + consent + IST + CSV + logo watermark
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -6,12 +6,12 @@ import "jspdf-autotable";
 // ====== Config ======
 const API_URL = process.env.REACT_APP_API_BASE_URL || "https://maxtt-billing-api.onrender.com";
 const API_KEY = "supersecret123"; // used for writes (create/update)
-const IST_FMT = { timeZone: "Asia/Kolkata" };
+const IST_TZ = "Asia/Kolkata";
 
 // Pricing & tax (fixed)
-const PRICE_PER_ML = 4.5;  // ₹ per ml — fixed
-const GST_PERCENT  = 18;   // 18% — fixed
-const DISCOUNT_MAX_PCT = 30; // hard cap at 30%
+const PRICE_PER_ML = 4.5;     // ₹ per ml — fixed
+const GST_PERCENT  = 18;      // % — fixed
+const DISCOUNT_MAX_PCT = 30;  // hard cap at 30%
 
 // ====== Font loader (Poppins, no HTML edits needed) ======
 function HeadFontLoader() {
@@ -28,7 +28,15 @@ function HeadFontLoader() {
   return null;
 }
 
-// ===== Money (INR) =====
+// ===== Helpers =====
+function formatIST(dateLike) {
+  const d = dateLike instanceof Date ? dateLike : new Date(dateLike);
+  const fmt = new Intl.DateTimeFormat("en-IN", {
+    timeZone: IST_TZ, day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", hour12: false
+  }).format(d);
+  return `${fmt} IST`;
+}
 function inr(num) {
   const n = Math.round((Number(num) || 0) * 100) / 100;
   const [intPartRaw, dec = "00"] = n.toFixed(2).split(".");
@@ -95,64 +103,119 @@ function fitmentSchema(vehicleType, tyreCount) {
 const textFromFitState = (stateObj) =>
   Object.entries(stateObj).filter(([, v]) => !!v).map(([k]) => k).join(", ");
 
-// ===== State code from GSTIN (for invoice display code) =====
+// ===== State code from GSTIN or profile =====
 const GST_STATE_NUM_TO_ABBR = {
   "01":"JK","02":"HP","03":"PB","04":"CH","05":"UT","06":"HR","07":"DL","08":"RJ","09":"UP","10":"BR","11":"SK",
   "12":"AR","13":"NL","14":"MN","15":"MZ","16":"TR","17":"ML","18":"AS","19":"WB","20":"JH","21":"OR","22":"CT",
   "23":"MP","24":"GJ","26":"DD","27":"MH","28":"AP","29":"KA","30":"GA","31":"LD","32":"KL","33":"TN","34":"PY",
   "35":"AN","36":"TS","37":"ANP","97":"Other","99":"Center"
 };
-function stateAbbrFromGstin(gstin) {
-  if (!gstin || typeof gstin !== "string" || gstin.length < 2) return "XX";
-  const code = gstin.slice(0,2);
-  return GST_STATE_NUM_TO_ABBR[code] || "XX";
+const INDIA_STATE_ABBR = {
+  "JAMMU AND KASHMIR":"JK","HIMACHAL PRADESH":"HP","PUNJAB":"PB","CHANDIGARH":"CH","UTTARAKHAND":"UT",
+  "HARYANA":"HR","DELHI":"DL","RAJASTHAN":"RJ","UTTAR PRADESH":"UP","BIHAR":"BR","SIKKIM":"SK","ARUNACHAL PRADESH":"AR",
+  "NAGALAND":"NL","MANIPUR":"MN","MIZORAM":"MZ","TRIPURA":"TR","MEGHALAYA":"ML","ASSAM":"AS","WEST BENGAL":"WB",
+  "JHARKHAND":"JH","ODISHA":"OR","CHHATTISGARH":"CT","MADHYA PRADESH":"MP","GUJARAT":"GJ","DAMAN AND DIU":"DD",
+  "MAHARASHTRA":"MH","ANDHRA PRADESH":"AP","KARNATAKA":"KA","GOA":"GA","LAKSHADWEEP":"LD","KERALA":"KL","TAMIL NADU":"TN",
+  "PUDUCHERRY":"PY","ANDAMAN AND NICOBAR ISLANDS":"AN","TELANGANA":"TS","ANDHRA PRADESH (NEW)":"ANP"
+};
+function stateAbbrFromProfile(profile) {
+  // 1) explicit franchisee_state
+  const pstate = (profile?.franchisee_state || "").trim().toUpperCase();
+  if (pstate && INDIA_STATE_ABBR[pstate]) return INDIA_STATE_ABBR[pstate];
+
+  // 2) GSTIN
+  const gstin = (profile?.gstin || "").trim();
+  if (gstin.length >= 2) {
+    const code = gstin.slice(0,2);
+    if (GST_STATE_NUM_TO_ABBR[code]) return GST_STATE_NUM_TO_ABBR[code];
+  }
+
+  // 3) Heuristic from address
+  const adr = (profile?.address || "").toUpperCase();
+  for (const [name, ab] of Object.entries(INDIA_STATE_ABBR)) {
+    if (adr.includes(name)) return ab;
+  }
+  return "XX";
 }
+
+// Order: FR_CODE / STATE / SEQ / MMYY
 function displayInvoiceCode(inv, profile) {
   const fr = (profile?.franchisee_id || "FR").replace(/\s+/g, "");
-  const st = stateAbbrFromGstin(profile?.gstin);
+  const st = stateAbbrFromProfile(profile);
   const dt = inv?.created_at ? new Date(inv.created_at) : new Date();
   const mm = String(dt.getMonth()+1).padStart(2,"0");
   const yy = String(dt.getFullYear()).slice(-2);
   const seq = String(inv?.id || 1).padStart(4,"0");
-  return `${fr}/${st}/${mm}${yy}/${seq}`;
+  return `${fr}/${st}/${seq}/${mm}${yy}`;
+}
+
+// ===== Watermark image preloader =====
+let WATERMARK_DATAURL = null;
+async function preloadWatermark() {
+  if (WATERMARK_DATAURL) return WATERMARK_DATAURL;
+  try {
+    const res = await fetch("/treadstone-watermark.png", { cache: "force-cache" });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => { WATERMARK_DATAURL = reader.result; resolve(WATERMARK_DATAURL); };
+      reader.readAsDataURL(blob);
+    });
+  } catch { return null; }
+}
+function AssetsLoader() {
+  useEffect(() => { preloadWatermark(); }, []);
+  return null;
 }
 
 // ===== PDF =====
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
-  const margin = 40;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 36; // tighter
   doc.setFont("helvetica", "normal");
 
-  // Franchisee header
-  doc.setFontSize(16);
+  // Header (Franchisee)
+  doc.setFontSize(15);
   doc.text(profile?.name || "Franchisee", margin, 40);
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   const addrLines = String(profile?.address || "Address not set").split(/\n|, /g).filter(Boolean);
-  addrLines.slice(0, 3).forEach((t, i) => doc.text(t, margin, 58 + i * 14));
-  let y = 58 + addrLines.length * 14 + 4;
-  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, margin, y); y += 14;
+  addrLines.slice(0, 3).forEach((t, i) => doc.text(t, margin, 56 + i * 12));
+  let y = 56 + addrLines.length * 12 + 2;
+  doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, margin, y); y += 12;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, y);
 
-  // Meta (force IST)
+  // Meta
   const created = inv.created_at ? new Date(inv.created_at) : new Date();
-  const dateStr = created.toLocaleString("en-IN", IST_FMT);
   const dispCode = displayInvoiceCode(inv, profile);
   doc.text(`Invoice No: ${dispCode}`, pageWidth - margin, 40, { align: "right" });
-  doc.text(`Date: ${dateStr}`, pageWidth - margin, 58, { align: "right" });
+  doc.text(`Date: ${formatIST(created)}`, pageWidth - margin, 56, { align: "right" });
 
-  // Watermark
-  doc.saveGraphicsState && doc.saveGraphicsState();
-  doc.setFontSize(56);
-  doc.setTextColor(210);
-  doc.text("MaxTT Billing", pageWidth / 2, 360, { angle: 35, align: "center" });
-  doc.setTextColor(0);
-  doc.restoreGraphicsState && doc.restoreGraphicsState();
+  // Watermark (logo or fallback text)
+  if (WATERMARK_DATAURL) {
+    try {
+      doc.saveGraphicsState();
+      doc.setGState(new doc.GState({ opacity: 0.10 }));
+      const wmWidth = 360;
+      const wmHeight = 360;
+      doc.addImage(WATERMARK_DATAURL, "PNG", (pageWidth - wmWidth)/2, (pageHeight - wmHeight)/2 - 40, wmWidth, wmHeight);
+      doc.restoreGraphicsState();
+    } catch {}
+  } else {
+    doc.saveGraphicsState && doc.saveGraphicsState();
+    doc.setFontSize(52);
+    doc.setTextColor(210);
+    doc.text("Treadstone Solutions", pageWidth / 2, pageHeight/2 - 20, { angle: 35, align: "center" });
+    doc.setTextColor(0);
+    doc.restoreGraphicsState && doc.restoreGraphicsState();
+  }
 
-  // Customer
-  const yCustStart = 120;
+  // Customer block
+  const yCustStart = 100;
   doc.setFontSize(12); doc.text("Customer Details", margin, yCustStart);
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
@@ -160,33 +223,41 @@ function generateInvoicePDF(inv, profile, taxMode) {
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`,
-  ].forEach((t, i) => doc.text(t, margin, yCustStart + 18 + i * 16));
+  ].forEach((t, i) => doc.text(t, margin, yCustStart + 16 + i * 14));
 
-  // Tyre/Vehicle
+  // Tyre/Vehicle block
   const yTyreStart = yCustStart;
-  const xRight = pageWidth / 2 + 20;
+  const xRight = pageWidth / 2 + 10;
   doc.setFontSize(12); doc.text("Tyre / Vehicle", xRight, yTyreStart);
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25 : null;
+
+  const treadList = (() => {
+    try { return inv.tread_depths_json ? JSON.parse(inv.tread_depths_json) : null; } catch { return null; }
+  })();
+  const treadLine = treadList
+    ? Object.entries(treadList).map(([k, v]) => `${k.split(" ×")[0]}: ${v}mm`).join(" | ")
+    : (inv.tread_depth_mm != null ? `Min Tread: ${inv.tread_depth_mm} mm` : "");
+
   [
     `Vehicle Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
-    `Tread Depth: ${inv.tread_depth_mm ?? ""} mm`,
+    `Tread Depths: ${treadLine}`,
     `Fitment: ${inv.fitment_locations || ""}`,
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
-  ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 18 + i * 16));
+  ].forEach((t, i) => doc.text(t, xRight, yTyreStart + 16 + i * 14));
 
-  // Amounts (show both discount & installation & tax split)
+  // Amounts (with discount/installation/tax split)
   const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
   const maxDisc = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
   const discountUsed = Math.min(Number(inv.discount || 0), maxDisc);
   const install = Number(inv.installation_fee || 0);
   const base = Math.max(0, baseRaw - discountUsed + install);
-
   let cgst = 0, sgst = 0, igst = 0;
-  if ((taxMode || inv.tax_mode) === "CGST_SGST") {
+  const mode = (taxMode || inv.tax_mode) === "IGST" ? "IGST" : "CGST_SGST";
+  if (mode === "CGST_SGST") {
     cgst = (base * GST_PERCENT) / 200;
     sgst = (base * GST_PERCENT) / 200;
   } else {
@@ -196,7 +267,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const grand = base + gstTotal;
 
   doc.autoTable({
-    startY: yCustStart + 150,
+    startY: yCustStart + 140,
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
@@ -204,7 +275,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["Gross (dosage × price)", inr(baseRaw)],
       ["Discount (₹)", `-${inr(discountUsed)} (cap ${DISCOUNT_MAX_PCT}%)`],
       ["Installation Charges (₹)", inr(install)],
-      ["Tax Mode", (taxMode || inv.tax_mode) === "CGST_SGST" ? "CGST+SGST" : "IGST"],
+      ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
       ["CGST (9%)", inr(cgst)],
       ["SGST (9%)", inr(sgst)],
       ["IGST (18%)", inr(igst)],
@@ -212,38 +283,39 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["GST Total", inr(gstTotal)],
       ["Total (with GST)", inr(grand)],
     ],
-    styles: { fontSize: 11, cellPadding: 6 },
+    styles: { fontSize: 10, cellPadding: 5 },
     headStyles: { fillColor: [60, 60, 60] },
+    margin: { left: margin, right: margin }
   });
 
   // Signature block
-  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 18 : 480;
-  doc.setFontSize(11);
+  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 14 : 460;
+  doc.setFontSize(10.5);
   doc.text("Customer Signature:", margin, yAfter);
   if (inv.customer_signature) {
-    try { doc.addImage(inv.customer_signature, "PNG", margin + 140, yAfter - 14, 140, 50); } catch {}
+    try { doc.addImage(inv.customer_signature, "PNG", margin + 120, yAfter - 12, 130, 44); } catch {}
   }
   if (inv.signed_at) {
     const sdt = new Date(inv.signed_at);
-    doc.text(`Signed at: ${sdt.toLocaleString("en-IN", IST_FMT)}`, margin + 300, yAfter);
+    doc.text(`Signed at: ${formatIST(sdt)}`, margin + 280, yAfter);
   }
-  yAfter += 70;
+  yAfter += 60;
 
-  // Declaration + T&C
+  // Declaration + T&C (smaller font, tighter)
   doc.setFontSize(10);
+  const maxWidth = pageWidth - margin * 2;
   const decl = [
     "Customer Declaration",
     "1. I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
     "2. I have read, understood, and accepted the Terms & Conditions stated herein.",
     "3. I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions.",
   ];
-  const maxWidth = pageWidth - margin * 2;
   decl.forEach((p, idx) => {
     const wrapped = doc.splitTextToSize(p, maxWidth);
-    if (idx === 0) { doc.setFontSize(11); doc.setFont(undefined, "bold"); }
-    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 14; });
+    if (idx === 0) { doc.setFontSize(10.5); doc.setFont(undefined, "bold"); }
+    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 12; });
     if (idx === 0) { doc.setFont(undefined, "normal"); doc.setFontSize(10); }
-    yAfter += 4;
+    yAfter += 2;
   });
 
   const footer = [
@@ -254,10 +326,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   footer.forEach((p, idx) => {
     const wrapped = doc.splitTextToSize(p, maxWidth);
-    if (idx === 0) { doc.setFontSize(11); doc.setFont(undefined, "bold"); }
-    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 14; });
+    if (idx === 0) { doc.setFontSize(10.5); doc.setFont(undefined, "bold"); }
+    wrapped.forEach((ln) => { doc.text(ln, margin, yAfter); yAfter += 12; });
     if (idx === 0) { doc.setFont(undefined, "normal"); doc.setFontSize(10); }
-    yAfter += 2;
+    yAfter += 1;
   });
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
@@ -290,7 +362,7 @@ function LoginView({ onLoggedIn }) {
   }
 
   return (
-    <div style={{ maxWidth: 480, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8, fontFamily: POPPINS }}>
+    <div style={{ maxWidth: 480, margin: "120px auto", padding: 16, border: "1px solid #ddd", borderRadius: 8, fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' }}>
       <h2 style={{ marginTop: 0 }}>Login</h2>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <label><input type="radio" name="role" checked={role==="franchisee"} onChange={()=>setRole("franchisee")} /> Franchisee</label>
@@ -362,7 +434,7 @@ Customer Consent to Proceed
   if (!open) return null;
   return (
     <div style={modalWrap}>
-      <div style={{ ...modalBox, maxWidth: 780, fontFamily: POPPINS }}>
+      <div style={{ ...modalBox, maxWidth: 780, fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' }}>
         <h3 style={{ marginTop: 0 }}>{title}</h3>
 
         <div style={{
@@ -459,7 +531,7 @@ function RecentInvoices({ token, profile }) {
   if (error)   return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
 
   return (
-    <div style={{ marginTop: 24, fontFamily: POPPINS }}>
+    <div style={{ marginTop: 24, fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' }}>
       <h2>Invoices</h2>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center",
                     marginBottom: 10, border: "1px solid #eee", padding: 8, borderRadius: 6 }}>
@@ -501,7 +573,7 @@ function RecentInvoices({ token, profile }) {
               {rows.map(r => (
                 <tr key={r.id}>
                   <td>{r.id}</td>
-                  <td>{new Date(r.created_at).toLocaleString("en-IN", IST_FMT)}</td>
+                  <td>{formatIST(r.created_at)}</td>
                   <td>{r.customer_name ?? ""}</td>
                   <td>{r.vehicle_number ?? ""}</td>
                   <td>{r.vehicle_type ?? ""}</td>
@@ -520,16 +592,10 @@ function RecentInvoices({ token, profile }) {
   );
 }
 
-const POPPINS = { fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' };
 const modalWrap = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,.40)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 16,
-  zIndex: 9999
+  position: "fixed", inset: 0, background: "rgba(0,0,0,.40)",
+  display: "flex", alignItems: "center", justifyContent: "center",
+  padding: 16, zIndex: 9999
 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
@@ -559,7 +625,7 @@ function FranchiseeApp({ token, onLogout }) {
     const init = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
     return init;
   });
-  // Per-tyre tread depths (by label)
+  // Per-tyre tread depths
   const [treadByTyre, setTreadByTyre] = useState(() => {
     const obj = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => obj[l] = "");
     return obj;
@@ -567,9 +633,9 @@ function FranchiseeApp({ token, onLogout }) {
   const [installerName, setInstallerName] = useState("");
 
   // 3) Pricing & Taxes (fixed)
-  const [discountInr, setDiscountInr] = useState("");         // ₹
+  const [discountInr, setDiscountInr] = useState("");             // ₹
   const [installationFeeInr, setInstallationFeeInr] = useState(""); // ₹
-  const [taxMode, setTaxMode] = useState("CGST_SGST");        // or "IGST"
+  const [taxMode, setTaxMode] = useState("CGST_SGST");            // or "IGST"
 
   // Optional customer GSTIN
   const [gstin, setGstin] = useState("");
@@ -584,6 +650,9 @@ function FranchiseeApp({ token, onLogout }) {
       .then(setProfile)
       .catch(() => setProfile(null));
   }, [token]);
+
+  // Preload assets (logo watermark)
+  useEffect(() => { preloadWatermark(); }, []);
 
   function onVehicleTypeChange(v) {
     setVehicleType(v);
@@ -627,11 +696,11 @@ function FranchiseeApp({ token, onLogout }) {
     // Consent gate
     if (!signatureData) { setSigOpen(true); return; }
 
-    // Required basic fields
+    // Required basics
     const minTd = minTreadFor(vehicleType);
     if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number."); return; }
 
-    // Validate per-tyre tread depth (all labels must be provided & >= min)
+    // Validate per-tyre tread depth
     const schema = fitmentSchema(vehicleType, tyreCount);
     for (const label of schema.labels) {
       const v = num(treadByTyre[label], -1);
@@ -645,7 +714,7 @@ function FranchiseeApp({ token, onLogout }) {
     if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
     const totalMl = perTyre * tCount;
 
-    // Pricing math (fixed price/GST and discount cap)
+    // Pricing math
     const baseRaw = totalMl * PRICE_PER_ML;
     const maxDiscount = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
     const enteredDiscount = Math.max(0, Math.round(num(discountInr)));
@@ -685,8 +754,10 @@ function FranchiseeApp({ token, onLogout }) {
       aspect_ratio: num(aspectRatio),
       rim_diameter_in: num(rimDiameter),
       fitment_locations: textFromFitState(fit) || null,
-      tread_depth_mm: Math.min(...Object.values(treadByTyre).map(v => num(v, 0))), // keep legacy single value as minimum
-      tread_depths_json: JSON.stringify(treadByTyre), // full map
+
+      // tread depths
+      tread_depth_mm: Math.min(...Object.values(treadByTyre).map(v => num(v, 0))), // legacy min
+      tread_depths_json: JSON.stringify(treadByTyre),
 
       // Dosage
       dosage_ml: totalMl,
@@ -714,7 +785,6 @@ function FranchiseeApp({ token, onLogout }) {
       customer_signature: signatureData,
       signed_at: consentSignedAt,
 
-      // misc placeholders
       gps_lat: null, gps_lng: null, customer_code: null
     });
 
@@ -723,8 +793,7 @@ function FranchiseeApp({ token, onLogout }) {
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
       if (inv) generateInvoicePDF(inv, profile, taxMode);
-      // reset signature & form bits that are one-time
-      setSignatureData(""); setConsentMeta(null);
+      setSignatureData(""); setConsentMeta(null); // ready for next invoice
     }
   };
 
@@ -734,6 +803,7 @@ function FranchiseeApp({ token, onLogout }) {
   return (
     <div style={{ maxWidth: 1220, margin: "20px auto", padding: 10, ...baseStyle }}>
       <HeadFontLoader />
+      <AssetsLoader />
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h1>MaxTT Billing & Dosage Calculator</h1>
@@ -856,7 +926,7 @@ function FranchiseeApp({ token, onLogout }) {
           Discount is capped at <strong>{DISCOUNT_MAX_PCT}%</strong> of (dosage × price). GST at <strong>{GST_PERCENT}%</strong>.
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 10 }}>
           <input placeholder="Customer GSTIN (optional)" value={gstin} onChange={e => setGstin(e.target.value)} />
         </div>
       </div>
