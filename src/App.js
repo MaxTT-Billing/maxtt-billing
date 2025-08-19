@@ -1,23 +1,23 @@
-// src/App.js — Base Layout v1 — formatting update:
-// - Per-tyre tread depths render cleanly (2-per line)
-// - Larger boxed areas for Installer/Customer signatures
-// - Declaration & T&C smaller font/tighter line-height
-// - All prior features preserved
+// src/App.js — Base Layout v2 (4 fixes)
+// 1) Clear section separators and spacing between header, customer/vehicle, amounts, declarations, signatures
+// 2) Remove "(cap 30%)" from Discount row in PDF (cap still enforced in logic)
+// 3) Merge Fitment + Treads (mm) into one block (two-per-line) and remove old comma list
+// 4) Force-robust IST time formatting with manual fallback
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 
-// ====== Config ======
+// ===== App/Backend Config =====
 const API_URL = process.env.REACT_APP_API_BASE_URL || "https://maxtt-billing-api.onrender.com";
-const API_KEY = "supersecret123"; // used for writes (create/update)
+const API_KEY = "supersecret123";
 const IST_TZ = "Asia/Kolkata";
 
-// Pricing & tax (fixed)
-const PRICE_PER_ML = 4.5;     // ₹ per ml — fixed
-const GST_PERCENT  = 18;      // % — fixed
-const DISCOUNT_MAX_PCT = 30;  // hard cap at 30%
+// Pricing & Tax (fixed policy)
+const PRICE_PER_ML = 4.5;     // ₹ per ml
+const GST_PERCENT  = 18;      // %
+const DISCOUNT_MAX_PCT = 30;  // cap (hidden on invoice)
 
-// ====== Font loader (Poppins) ======
+// ===== Font for UI (Poppins) =====
 function HeadFontLoader() {
   useEffect(() => {
     const id = "poppins-font-link";
@@ -32,7 +32,7 @@ function HeadFontLoader() {
   return null;
 }
 
-// ===== Helpers (IST + money) =====
+// ===== Helpers (date/IST + money) =====
 function parseDateFlexible(v) {
   if (v instanceof Date) return v;
   if (!v) return new Date();
@@ -44,13 +44,32 @@ function parseDateFlexible(v) {
   const d2 = new Date(addZ);
   return isNaN(d2) ? new Date() : d2;
 }
+function pad2(x) { return String(x).padStart(2, "0"); }
+/** Robust IST formatter: tries Intl('Asia/Kolkata'); falls back to manual +330 min */
 function formatIST(dateLike) {
   const d = parseDateFlexible(dateLike);
-  const fmt = new Intl.DateTimeFormat("en-IN", {
-    timeZone: IST_TZ, day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit", hour12: false
-  }).format(d);
-  return `${fmt} IST`;
+  try {
+    // Some browsers ignore TZ; this still gives correct IST on modern ones
+    const s = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_TZ, day: "2-digit", month: "2-digit", year: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: false
+    }).format(d);
+    return `${s} IST`;
+  } catch {
+    // Manual fallback (UTC + 330 minutes), format as DD/MM/YYYY, HH:MM IST
+    const utcMs = Date.UTC(
+      d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+      d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()
+    );
+    const istMs = utcMs + 330 * 60 * 1000; // +5:30
+    const t = new Date(istMs);
+    const DD = pad2(t.getUTCDate());
+    const MM = pad2(t.getUTCMonth() + 1);
+    const YYYY = t.getUTCFullYear();
+    const HH = pad2(t.getUTCHours());
+    const mm = pad2(t.getUTCMinutes());
+    return `${DD}/${MM}/${YYYY}, ${HH}:${mm} IST`;
+  }
 }
 function inr(num) {
   const n = Math.round((Number(num) || 0) * 100) / 100;
@@ -73,9 +92,7 @@ const VEHICLE_CFG = {
   "3-Wheeler (Auto)":               { k: 2.2, bufferPct: 0.03, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   "6-Wheeler (Bus/LTV)":            { k: 3.0,  bufferPct: 0.05, defaultTyres: 6, options: [6] },
-  "HTV (>6 wheels: Trucks/Trailers/Mining)": {
-    k: 3.0, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18]
-  }
+  "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.0, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18] }
 };
 const TREAD_MIN_MM = {
   "2-Wheeler (Scooter/Motorcycle)": 1.5,
@@ -118,7 +135,7 @@ function fitmentSchema(vehicleType, tyreCount) {
 const textFromFitState = (stateObj) =>
   Object.entries(stateObj).filter(([, v]) => !!v).map(([k]) => k).join(", ");
 
-// ===== State code from GSTIN or profile =====
+// ===== State code (FR header / invoice code) =====
 const GST_STATE_NUM_TO_ABBR = {
   "01":"JK","02":"HP","03":"PB","04":"CH","05":"UT","06":"HR","07":"DL","08":"RJ","09":"UP","10":"BR","11":"SK",
   "12":"AR","13":"NL","14":"MN","15":"MZ","16":"TR","17":"ML","18":"AS","19":"WB","20":"JH","21":"OR","22":"CT",
@@ -147,7 +164,7 @@ function stateAbbrFromProfile(profile) {
   }
   return "XX";
 }
-// Order: FR_CODE / STATE / SEQ / MMYY
+// FR_CODE/STATE/SEQ/MMYY
 function displayInvoiceCode(inv, profile) {
   const fr = (profile?.franchisee_id || "FR").replace(/\s+/g, "");
   const st = stateAbbrFromProfile(profile);
@@ -158,7 +175,7 @@ function displayInvoiceCode(inv, profile) {
   return `${fr}/${st}/${seq}/${mm}${yy}`;
 }
 
-// ===== Watermark image preloader =====
+// ===== Watermark preloader =====
 let WATERMARK_DATAURL = null;
 async function preloadWatermark() {
   if (WATERMARK_DATAURL) return WATERMARK_DATAURL;
@@ -175,16 +192,19 @@ async function preloadWatermark() {
 }
 function AssetsLoader() { useEffect(() => { preloadWatermark(); }, []); return null; }
 
-// ===== PDF helpers =====
+// ===== PDF section helpers =====
+function drawSeparator(doc, y, pageWidth, margin) {
+  doc.setDrawColor(200);
+  doc.setLineWidth(0.6);
+  doc.line(margin, y, pageWidth - margin, y);
+}
 function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, fontSize = 9.5) {
-  // Title
   try { doc.setFont(undefined, "bold"); } catch {}
   doc.setFontSize(fontSize + 1);
   doc.text(title, x, y);
   y += lineH;
   try { doc.setFont(undefined, "normal"); } catch {}
 
-  // Hanging indent for numbers (1., 2., …)
   const numberWidth = doc.getTextWidth("00. ");
   const gap = 4;
   const textWidth = maxWidth - numberWidth - gap;
@@ -195,20 +215,20 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, font
     doc.text(label, x, y);
     const lines = doc.splitTextToSize(txt, textWidth);
     lines.forEach((ln) => { doc.text(ln, x + numberWidth + gap, y); y += lineH; });
-    y += 1; // small gap between points
+    y += 1;
   });
   return y;
 }
 
-// ===== PDF (UPDATED FORMATTING) =====
+// ===== PDF Generation (v2) =====
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 36; // tighter
+  const margin = 36;
   doc.setFont("helvetica", "normal");
 
-  // Header (Franchisee)
+  // --- 1) Franchisee Header ---
   doc.setFontSize(15);
   doc.text(profile?.name || "Franchisee", margin, 40);
   doc.setFontSize(10.5);
@@ -218,33 +238,34 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, margin, y); y += 12;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, margin, y);
 
-  // Meta
   const created = parseDateFlexible(inv.created_at || Date.now());
   const dispCode = displayInvoiceCode(inv, profile);
   doc.text(`Invoice No: ${dispCode}`, pageWidth - margin, 40, { align: "right" });
   doc.text(`Date: ${formatIST(created)}`, pageWidth - margin, 56, { align: "right" });
 
-  // Watermark (logo or fallback text)
+  // Watermark
   if (WATERMARK_DATAURL) {
     try {
       doc.saveGraphicsState();
-      doc.setGState(new doc.GState({ opacity: 0.10 }));
+      doc.setGState(new doc.GState({ opacity: 0.08 }));
       const wmWidth = 360, wmHeight = 360;
       doc.addImage(WATERMARK_DATAURL, "PNG", (pageWidth - wmWidth)/2, (pageHeight - wmHeight)/2 - 40, wmWidth, wmHeight);
       doc.restoreGraphicsState();
     } catch {}
   } else {
     try { doc.saveGraphicsState(); } catch {}
-    doc.setFontSize(52);
+    doc.setFontSize(50);
     doc.setTextColor(210);
     doc.text("Treadstone Solutions", pageWidth / 2, pageHeight/2 - 20, { angle: 35, align: "center" });
     doc.setTextColor(0);
     try { doc.restoreGraphicsState(); } catch {}
   }
 
-  // Customer block
+  drawSeparator(doc, 86, pageWidth, margin);
+
+  // --- 2) Customer & Vehicle ---
   const yCustStart = 100;
-  doc.setFontSize(12); doc.text("Customer Details", margin, yCustStart);
+  doc.setFontSize(12); doc.text("Customer & Vehicle", margin, yCustStart);
   doc.setFontSize(10.5);
   [
     `Name: ${inv.customer_name || ""}`,
@@ -255,41 +276,40 @@ function generateInvoicePDF(inv, profile, taxMode) {
     `Installer: ${inv.installer_name || ""}`,
   ].forEach((t, i) => doc.text(t, margin, yCustStart + 16 + i * 14));
 
-  // Tyre/Vehicle block
-  const yTyreStart = yCustStart;
+  // Vehicle specifics (right half)
   const xRight = pageWidth / 2 + 10;
-  doc.setFontSize(12); doc.text("Tyre / Vehicle", xRight, yTyreStart);
+  doc.setFontSize(12); doc.text("Vehicle Details", xRight, yCustStart);
   doc.setFontSize(10.5);
-  const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25 : null;
 
-  // Tread depths pretty (2 items per line)
+  // Per-tyre treads block (two-per-line)
   const treadMap = (() => {
     try { return inv.tread_depths_json ? JSON.parse(inv.tread_depths_json) : null; } catch { return null; }
   })();
-  let treadBlockLines = [];
+  let treadLines = [];
   if (treadMap && typeof treadMap === "object") {
-    const entries = Object.entries(treadMap).map(([k, v]) => `${k.split(" ×")[0]}: ${v}mm`);
+    const entries = Object.entries(treadMap).map(([k, v]) => `${k.split(" ×")[0]} – ${v}mm`);
     for (let i = 0; i < entries.length; i += 2) {
-      treadBlockLines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
+      treadLines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
     }
   }
-  const treadHeader = treadBlockLines.length ? "Tread Depths (mm):" :
-    (inv.tread_depth_mm != null ? `Min Tread: ${inv.tread_depth_mm} mm` : "");
+  const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml || 0) / inv.tyre_count) / 25) * 25 : null;
 
-  // Right column items
   const rightItems = [
-    `Vehicle Category: ${inv.vehicle_type || ""}`,
+    `Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
-    treadHeader,
-    ...(treadBlockLines.length ? treadBlockLines : []),
-    `Fitment: ${inv.fitment_locations || ""}`,
+    (treadLines.length ? "Fitment & Treads (mm):" : (inv.tread_depth_mm != null ? `Min Tread: ${inv.tread_depth_mm} mm` : "")),
+    ...(treadLines.length ? treadLines : []),
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
     `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
-  ];
-  rightItems.forEach((t, i) => doc.text(t, xRight, yTyreStart + 16 + i * 14));
+  ].filter(Boolean);
 
-  // Amounts (with discount/installation/tax split)
+  rightItems.forEach((t, i) => doc.text(t, xRight, yCustStart + 16 + i * 14));
+
+  drawSeparator(doc, yCustStart + 150, pageWidth, margin);
+
+  // --- 3) Invoicing (Amounts) ---
+  // Recompute on the fly to guarantee consistency
   const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
   const maxDisc = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
   const discountUsed = Math.min(Number(inv.discount || 0), maxDisc);
@@ -303,15 +323,15 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const grand = base + gstTotal;
 
   doc.autoTable({
-    startY: yCustStart + 150,
+    startY: yCustStart + 165,
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
       ["MRP per ml", inr(Number(inv.price_per_ml || PRICE_PER_ML))],
       ["Gross (dosage × price)", inr(baseRaw)],
-      ["Discount (₹)", `-${inr(discountUsed)} (cap ${DISCOUNT_MAX_PCT}%)`],
+      ["Discount (₹)", `-${inr(discountUsed)}`],              // <-- no "(cap 30%)" text
       ["Installation Charges (₹)", inr(install)],
-      ["Tax Mode", mode === "CGST_SGST" ? "CGT+SGST" : "IGST"],
+      ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
       ["CGST (9%)", inr(cgst)],
       ["SGST (9%)", inr(sgst)],
       ["IGST (18%)", inr(igst)],
@@ -324,20 +344,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
     margin: { left: margin, right: margin }
   });
 
-  // Signature block (legacy inline signature preview)
-  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 12 : 460;
-  doc.setFontSize(10.5);
-  doc.text("Customer Signature:", margin, yAfter);
-  if (inv.customer_signature) {
-    try { doc.addImage(inv.customer_signature, "PNG", margin + 120, yAfter - 12, 130, 44); } catch {}
-  }
-  if (inv.signed_at) {
-    const sdt = parseDateFlexible(inv.signed_at);
-    doc.text(`Signed at: ${formatIST(sdt)}`, margin + 280, yAfter);
-  }
-  yAfter += 58;
+  let yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : 460;
+  drawSeparator(doc, yAfter, pageWidth, margin); yAfter += 12;
 
-  // Declaration + T&C with hanging indent (smaller)
+  // --- 4) Declarations & Terms ---
   const maxWidth = pageWidth - margin * 2;
   const declItems = [
     "I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
@@ -353,26 +363,40 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, margin, yAfter, maxWidth, 11, 9.5);
 
-  // Bottom signature boxes (bigger, with space to sign/stamp)
+  drawSeparator(doc, yAfter + 6, pageWidth, margin);
+
+  // --- 5) Signature Boxes ---
   const boxWidth = 260, boxHeight = 64;
   const gapFromBottom = 70;
   const boxY = pageHeight - gapFromBottom - boxHeight;
 
-  // left box
+  // left box (installer)
   doc.rect(margin, boxY, boxWidth, boxHeight);
   doc.setFontSize(10);
   doc.text("Installer Sign & Stamp", margin + 10, boxY + boxHeight + 14);
 
-  // right box
+  // right box (customer)
   doc.rect(pageWidth - margin - boxWidth, boxY, boxWidth, boxHeight);
   doc.text("Customer Signature", pageWidth - margin - boxWidth + 10, boxY + boxHeight + 14);
+
+  // Inline captured signature preview + time
+  const sigY = boxY - 58;
+  doc.setFontSize(10.5);
+  doc.text("Customer Signature (captured):", margin, sigY);
+  if (inv.customer_signature) {
+    try { doc.addImage(inv.customer_signature, "PNG", margin + 190, sigY - 14, 130, 44); } catch {}
+  }
+  if (inv.signed_at) {
+    const sdt = parseDateFlexible(inv.signed_at);
+    doc.text(`Signed at: ${formatIST(sdt)}`, margin + 340, sigY);
+  }
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
 }
 
 // ===== Login =====
 function LoginView({ onLoggedIn }) {
-  const [role, setRole] = useState("franchisee"); // franchisee | admin | super_admin
+  const [role, setRole] = useState("franchisee");
   const [id, setId] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -414,7 +438,7 @@ function LoginView({ onLoggedIn }) {
   );
 }
 
-// ===== SignaturePad with consent =====
+// ===== Signature Pad with Consent (blocking) =====
 function SignaturePad({ open, onClose, onSave, title = "Customer Consent & Signature" }) {
   const canvasRef = useRef(null);
   const [drawing, setDrawing] = useState(false);
@@ -510,7 +534,7 @@ Customer Consent to Proceed
   );
 }
 
-// ===== Invoices list =====
+// ===== Invoices List =====
 function RecentInvoices({ token, profile }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -639,7 +663,7 @@ function RecentInvoices({ token, profile }) {
 const modalWrap = { position: "fixed", inset: 0, background: "rgba(0,0,0,.40)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 9999 };
 const modalBox  = { background: "#fff", borderRadius: 8, padding: 12, maxWidth: 900, width: "100%" };
 
-// ===== Franchisee App (Base Layout v1) =====
+// ===== Franchisee App =====
 function FranchiseeApp({ token, onLogout }) {
   const [profile, setProfile] = useState(null);
 
@@ -654,6 +678,7 @@ function FranchiseeApp({ token, onLogout }) {
   const [mobileNumber, setMobileNumber] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [odometer, setOdometer] = useState("");
+  const [installerName, setInstallerName] = useState("");
 
   // 2) Vehicle & Fitment
   const [vehicleType, setVehicleType] = useState("4-Wheeler (Passenger Car/Van/SUV)");
@@ -665,19 +690,15 @@ function FranchiseeApp({ token, onLogout }) {
     const init = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => (init[l] = false));
     return init;
   });
-  // Per-tyre tread depths
   const [treadByTyre, setTreadByTyre] = useState(() => {
     const obj = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => obj[l] = "");
     return obj;
   });
-  const [installerName, setInstallerName] = useState("");
 
   // 3) Pricing & Taxes (fixed)
   const [discountInr, setDiscountInr] = useState("");             // ₹
   const [installationFeeInr, setInstallationFeeInr] = useState(""); // ₹
   const [taxMode, setTaxMode] = useState("CGST_SGST");            // or "IGST"
-
-  // Optional customer GSTIN
   const [gstin, setGstin] = useState("");
 
   // Profile
@@ -691,7 +712,7 @@ function FranchiseeApp({ token, onLogout }) {
       .catch(() => setProfile(null));
   }, [token]);
 
-  // Preload assets (logo watermark)
+  // Preload assets
   useEffect(() => { preloadWatermark(); }, []);
 
   function onVehicleTypeChange(v) {
@@ -700,14 +721,12 @@ function FranchiseeApp({ token, onLogout }) {
     const nextTyres = cfg.defaultTyres;
     setTyreCount(nextTyres);
     const schema = fitmentSchema(v, nextTyres);
-
     const nextFit = {}; schema.labels.forEach(l => (nextFit[l] = false)); setFit(nextFit);
     const nextTread = {}; schema.labels.forEach(l => (nextTread[l] = "")); setTreadByTyre(nextTread);
   }
   function onTyreCountChange(n) {
     setTyreCount(n);
     const schema = fitmentSchema(vehicleType, n);
-
     const nextFit = {}; schema.labels.forEach(l => (nextFit[l] = false)); setFit(nextFit);
     const nextTread = {}; schema.labels.forEach(l => (nextTread[l] = "")); setTreadByTyre(nextTread);
   }
@@ -733,10 +752,10 @@ function FranchiseeApp({ token, onLogout }) {
   }
 
   const handleCalculateAndSave = async () => {
-    // Consent gate
+    // Block until consent/signature captured
     if (!signatureData) { setSigOpen(true); return; }
 
-    // Required basics
+    // Required fields
     const minTd = minTreadFor(vehicleType);
     if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number."); return; }
 
@@ -754,13 +773,12 @@ function FranchiseeApp({ token, onLogout }) {
     if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
     const totalMl = perTyre * tCount;
 
-    // Pricing math
+    // Pricing
     const baseRaw = totalMl * PRICE_PER_ML;
     const maxDiscount = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
     const enteredDiscount = Math.max(0, Math.round(num(discountInr)));
     const discountUsed = Math.min(enteredDiscount, maxDiscount);
     const installation = Math.max(0, Math.round(num(installationFeeInr)));
-
     const amountBeforeTax = Math.max(0, baseRaw - discountUsed + installation);
     let cgst = 0, sgst = 0, igst = 0;
     if (taxMode === "CGST_SGST") { cgst = (amountBeforeTax * GST_PERCENT) / 200; sgst = (amountBeforeTax * GST_PERCENT) / 200; }
@@ -791,17 +809,17 @@ function FranchiseeApp({ token, onLogout }) {
       rim_diameter_in: num(rimDiameter),
       fitment_locations: textFromFitState(fit) || null,
 
-      // tread depths
+      // Tread depths
       tread_depth_mm: Math.min(...Object.values(treadByTyre).map(v => num(v, 0))), // legacy min
       tread_depths_json: JSON.stringify(treadByTyre),
 
       // Dosage
       dosage_ml: totalMl,
 
-      // Optional customer GSTIN
+      // GSTIN (optional)
       customer_gstin: gstin || null,
 
-      // 3) Pricing & Tax (fixed)
+      // 3) Pricing & Tax
       price_per_ml: PRICE_PER_ML,
       discount: discountUsed,
       installation_fee: installation,
@@ -993,7 +1011,7 @@ function FranchiseeApp({ token, onLogout }) {
   );
 }
 
-// ===== Admin / Super Admin (table only) =====
+// ===== Admin / Super Admin (reuse list) =====
 function AdminApp({ token, onLogout }) {
   return (
     <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10, fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' }}>
