@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
+import DownloadInvoicesCsvButton from "./DownloadInvoicesCsvButton"; // <-- NEW
 
 const API_URL = "https://maxtt-billing-api.onrender.com";
 const API_KEY = "supersecret123"; // <-- set this to your backend API_KEY
@@ -167,7 +168,7 @@ function generateInvoicePDF(inv, profile) {
   }
   yAfter += 70;
 
-  // Final Declaration (printed above signature in invoice)
+  // Final Declaration
   doc.setFontSize(10);
   const decl = [
     "Customer Declaration",
@@ -184,7 +185,7 @@ function generateInvoicePDF(inv, profile) {
     yAfter += 4;
   });
 
-  // Footer T&C (frozen, always printed)
+  // Footer T&C
   const footer = [
     "Terms & Conditions",
     "1. The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
@@ -354,21 +355,28 @@ function RecentInvoices({ token, profile, onOpenDetails }) {
     return () => window.removeEventListener("invoices-updated", onUpdated);
   }, [fetchRows]);
 
-  function exportCsv() {
-    const params = new URLSearchParams();
-    if (q) params.set("q", q);
-    if (from) params.set("from", from);
-    if (to) params.set("to", to);
-    fetch(`${API_URL}/api/invoices/export?${params.toString()}`, { headers: headersAuth })
-      .then(async (r) => {
-        const blob = await r.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = "invoices_export.csv";
-        document.body.appendChild(a); a.click();
-        URL.revokeObjectURL(url); a.remove();
-      })
-      .catch(() => alert("Export failed"));
+  // UPDATED: use new export endpoint
+  async function exportCsv() {
+    try {
+      const params = new URLSearchParams();
+      if (q) params.set("q", q);
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const res = await fetch(`${API_URL}/api/exports/invoices?${params.toString()}`);
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      const disp = res.headers.get("Content-Disposition") || "";
+      const name = disp.includes("filename=")
+        ? disp.split('filename="')[1]?.split('"')[0] || "invoices.csv"
+        : "invoices.csv";
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("Export failed");
+    }
   }
 
   if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
@@ -545,6 +553,7 @@ function DetailsModal({ token, invoiceId, profile, onClose, onEdited }) {
           <h3 style={{ margin: 0 }}>Invoice #{inv.id}</h3>
           <div>
             <button onClick={() => generateInvoicePDF(inv, profile)} style={{ marginRight: 8 }}>Reprint PDF</button>
+            {!editing && <button onClick={saveEdits} style={{ marginRight: 8 }} onMouseDown={(e)=>e.preventDefault()}>Save</button>}
             {!editing && <button onClick={() => setEditing(true)} style={{ marginRight: 8 }}>Edit</button>}
             {editing && <button onClick={saveEdits} style={{ marginRight: 8 }}>Save</button>}
             <button onClick={onClose}>Close</button>
@@ -714,11 +723,11 @@ function FranchiseeApp({ token, onLogout }) {
 
     const nowIso = new Date().toISOString();
 
-    // consent text snapshot (midway) – kept short per our legal design
+    // consent text snapshot
     const consentSnapshot =
       "Customer Consent to Proceed: Informed of process, pricing and GST; consents to installation and undertakes to pay upon completion.";
 
-    // declaration snapshot (printed on invoice)
+    // declaration snapshot
     const declarationSnapshot =
       "Final Declaration: Installation completed to satisfaction; accepts T&C; acknowledges total amount payable.";
 
@@ -740,12 +749,10 @@ function FranchiseeApp({ token, onLogout }) {
       customer_gstin: gstin || null,
       customer_address: address || null,
 
-      // Mid-way consent (using same signature for now; can split later if needed)
       consent_signature: signatureData,
       consent_signed_at: nowIso,
       consent_snapshot: consentSnapshot,
 
-      // Final declaration + signature (same signature captured here)
       customer_signature: signatureData,
       signed_at: nowIso,
       declaration_snapshot: declarationSnapshot,
@@ -769,7 +776,10 @@ function FranchiseeApp({ token, onLogout }) {
     <div style={{ maxWidth: 1220, margin: "20px auto", padding: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <h1>MaxTT Billing & Dosage Calculator</h1>
-        <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <DownloadInvoicesCsvButton /> {/* <-- NEW button in header */}
+          <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+        </div>
       </div>
 
       {profile && (
@@ -907,7 +917,10 @@ function AdminApp({ token, onLogout }) {
     <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between" }}>
         <h1>Admin Console</h1>
-        <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <DownloadInvoicesCsvButton /> {/* optional for Admin too */}
+          <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+        </div>
       </div>
 
       <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10 }}>
@@ -995,7 +1008,10 @@ function SuperAdminApp({ token, onLogout }) {
     <div style={{ maxWidth: 1200, margin: "20px auto", padding: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between" }}>
         <h1>Super Admin Console</h1>
-        <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <DownloadInvoicesCsvButton /> {/* optional for SA too */}
+          <button onClick={() => { localStorage.removeItem("maxtt_token"); localStorage.removeItem("maxtt_role"); onLogout(); }}>Logout</button>
+        </div>
       </div>
 
       <div style={{ background: "#f9f9f9", padding: 8, borderRadius: 6, marginBottom: 10 }}>
