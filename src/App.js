@@ -218,7 +218,6 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, font
   });
   return y;
 }
-
 function parseTreadDepthsMap(maybe) {
   if (!maybe) return null;
   if (typeof maybe === "string") {
@@ -359,9 +358,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const blockTopPad = 10, blockBotPad = 10, blockSidePad = 10;
   const blockWidth = W - 2*M;
 
-  const z3Bottom = yAfter + zoneGap;
+  const z3Bottom = yAfter + 12;
   drawSeparator(doc, z3Bottom, W, M);
-  let yBlock = z3Bottom + zoneGap;
+  let yBlock = z3Bottom + 12;
 
   doc.setFontSize(11); try { doc.setFont(undefined, "bold"); } catch {}
   doc.text(midTitle, M, yBlock); yBlock += 14; try { doc.setFont(undefined, "normal"); } catch {}
@@ -371,8 +370,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.setFontSize(10.5);
   midText.forEach(t => { doc.text(t, M + blockSidePad, yy); yy += 12; });
   yAfter = yBlock + blockTopPad + blockBotPad + (midText.length * 12);
-  drawSeparator(doc, yAfter + zoneGap, W, M);
-  yAfter += zoneGap * 2;
+  drawSeparator(doc, yAfter + 12, W, M);
+  yAfter += 24;
 
   /** Zone 4 — Customer Declaration */
   const maxW = W - M*2;
@@ -383,7 +382,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter, maxW, 11, 9.0);
   drawSeparator(doc, yAfter + 6, W, M);
-  yAfter += 6 + zoneGap;
+  yAfter += 18;
 
   /** Zone 5 — Terms & Conditions */
   const termsItems = [
@@ -393,7 +392,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter, maxW, 11, 9.0);
   drawSeparator(doc, yAfter + 6, W, M);
-  yAfter += 6 + zoneGap;
+  yAfter += 18;
 
   /** Zone 6 — Signature boxes (bottom-preferred; auto-lift to avoid overlap) */
   const boxWidth = 260, boxHeight = 66;
@@ -792,7 +791,7 @@ function RecentInvoices({ token, profile }) {
   return (
     <div style={{ marginTop: 24, fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' }}>
       <h2>Invoices</h2>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10, border: "1px solid "#eee", padding: 8, borderRadius: 6 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10, border: "1px solid #eee", padding: 8, borderRadius: 6 }}>
         <input placeholder="Search name or vehicle no." value={q} onChange={e=>setQ(e.target.value)} style={{ flex: 1, minWidth: 280 }} />
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
           From: <input type="date" value={from} onChange={e=>setFrom(e.target.value)} />
@@ -910,7 +909,7 @@ function FranchiseeApp({ token, onLogout }) {
 
   // Validation helpers
   const sizeErrors = (() => {
-       const errs = {};
+    const errs = {};
     const w = num(tyreWidth), a = num(aspectRatio), r = num(rimDiameter);
     if (!(w >= SIZE_LIMITS.widthMin && w <= SIZE_LIMITS.widthMax)) errs.width = `Width must be ${SIZE_LIMITS.widthMin}–${SIZE_LIMITS.widthMax} mm`;
     if (!(a >= SIZE_LIMITS.aspectMin && a <= SIZE_LIMITS.aspectMax)) errs.aspect = `Aspect must be ${SIZE_LIMITS.aspectMin}–${SIZE_LIMITS.aspectMax}%`;
