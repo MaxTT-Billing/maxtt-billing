@@ -407,7 +407,7 @@ function SignaturePad({ open, onClose, onSave }) {
   const start = (e) => { setDrawing(true); const {x,y}=getPos(e); const ctx=canvasRef.current.getContext("2d"); ctx.beginPath(); ctx.moveTo(x,y); };
   const move =  (e) => { if (!drawing) return; const {x,y}=getPos(e); const ctx=canvasRef.current.getContext("2d"); ctx.lineTo(x,y); ctx.stroke(); setHasStroke(true); };
   const end =   () => setDrawing(false);
-  const clear = () => { const ctx=canvasRef.current.getContext("2d"); ctx.fillStyle="#fff"; ctx.fillRect(0,0,canvasRef.current.width,canvasRef.current.height); setHasStroke(false); };
+  const clear = () => { const ctx=canvasRef.current.getContext("2d"); ctx.fillStyle="#fff"; ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height); setHasStroke(false); };
   const save = () => {
     if (!agreed || !hasStroke) return;
     const dataUrl = canvasRef.current.toDataURL("image/png");
@@ -901,7 +901,6 @@ function FranchiseeApp({ token, onLogout }) {
     override_reason,
     override_chart_version,
     override_note,
-    computed_per_ty re, // prevent accidental typo: we do not use this variable
     computed_per_tyre,
     computed_total
   }) {
