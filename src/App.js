@@ -1,4 +1,4 @@
-// src/App.js — Consent → Review & Confirm (with manual override), per-tyre outlier checks, IST time, no watermark
+// src/App.js — Consent → Review & Confirm (manual override), outlier checks, strict IST, robust treads/fitment, no watermark
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -80,56 +80,34 @@ function inrRs(n) {
   const withCommas = other.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + last3;
   return `Rs. ${withCommas}.${dec}`;
 }
-function hasExplicitTZ(s) {
-  return /[zZ]|[+\-]\d{2}:\d{2}$/.test(s);
-}
-function parseDateFlexible(v) {
-  if (v instanceof Date) return v;
-  if (!v) return new Date();
-  const s = String(v);
-  const d = new Date(s);
+
+/** Timestamp utils */
+function hasExplicitTZ(s) { return /[zZ]|[+\-]\d{2}:\d{2}$/.test(s); }
+/** Parse a Date assuming **UTC** if the string is naive (no timezone). */
+function parseAssumingUTC(dateLike) {
+  if (dateLike instanceof Date) return new Date(dateLike.getTime());
+  if (!dateLike) return new Date();
+  let s = String(dateLike).trim();
+  if (!s) return new Date();
+  // normalize separator
+  if (!s.includes("T") && s.includes(" ")) s = s.replace(" ", "T");
+  const src = hasExplicitTZ(s) ? s : (s + "Z"); // force UTC if naive
+  const d = new Date(src);
   if (!isNaN(d)) return d;
-  const s2 = s.includes("T") ? s : s.replace(" ", "T");
-  const addZ = hasExplicitTZ(s2) ? s2 : (s2 + "Z");
-  const d2 = new Date(addZ);
-  return isNaN(d2) ? new Date() : d2;
+  // last resort: try native parse as-is
+  return new Date(s);
 }
 const pad2 = (x) => String(x).padStart(2, "0");
-/** IST formatter
- *  - If value has timezone (Z or ±HH:MM): convert to IST.
- *  - If it does NOT have timezone: treat it as already IST (no extra shift).
- */
+/** Strong IST formatter (always converts from UTC to IST; naive strings are treated as UTC) */
 function formatIST(dateLike) {
-  if (dateLike instanceof Date) {
-    const d = dateLike;
-    const utcMs = Date.UTC(
-      d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
-      d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
-    );
-    const istMs = utcMs + 330 * 60 * 1000;
-    const t = new Date(istMs);
-    return `${pad2(t.getUTCDate())}/${pad2(t.getUTCMonth()+1)}/${t.getUTCFullYear()}, ${pad2(t.getUTCHours())}:${pad2(t.getUTCMinutes())} IST`;
-  }
-  const s = String(dateLike || "");
-  if (hasExplicitTZ(s)) {
-    const d = new Date(s);
-    const utcMs = Date.UTC(
-      d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
-      d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
-    );
-    const istMs = utcMs + 330 * 60 * 1000;
-    const t = new Date(istMs);
-    return `${pad2(t.getUTCDate())}/${pad2(t.getUTCMonth()+1)}/${t.getUTCFullYear()}, ${pad2(t.getUTCHours())}:${pad2(t.getUTCMinutes())} IST`;
-  }
-  // naive string → already IST; try to pick components
-  const m = s.match(/(\d{4})[-/](\d{2})[-/](\d{2})[T\s](\d{2}):(\d{2})/);
-  if (m) {
-    const [,Y,Mo,D,H,Mi] = m.map(Number);
-    return `${pad2(D)}/${pad2(Mo)}/${Y}, ${pad2(H)}:${pad2(Mi)} IST`;
-  }
-  // fallback: parse & format as if it were IST
-  const d = parseDateFlexible(s);
-  return `${pad2(d.getDate())}/${pad2(d.getMonth()+1)}/${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())} IST`;
+  const d = parseAssumingUTC(dateLike);
+  const utcMs = Date.UTC(
+    d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+    d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
+  );
+  const istMs = utcMs + 330 * 60 * 1000; // +5:30
+  const t = new Date(istMs);
+  return `${pad2(t.getUTCDate())}/${pad2(t.getUTCMonth()+1)}/${t.getUTCFullYear()}, ${pad2(t.getUTCHours())}:${pad2(t.getUTCMinutes())} IST`;
 }
 
 /* =======================
@@ -154,6 +132,40 @@ function fitmentSchema(vehicleType, tyreCount) {
   };
 }
 const textFromFitState = (obj) => Object.entries(obj).filter(([,v]) => !!v).map(([k]) => k).join(", ");
+function parseTreadDepthsMap(maybe) {
+  if (!maybe) return null;
+  if (typeof maybe === "string") {
+    try { return JSON.parse(maybe); } catch { return null; }
+  }
+  if (typeof maybe === "object") return maybe;
+  return null;
+}
+/** Build paired lines like "Front Left – 4.5mm     Front Right – 4.6mm" for PDF */
+function buildTreadLines(inv) {
+  const labels = fitmentSchema(inv.vehicle_type, inv.tyre_count || 0).labels;
+  const map = parseTreadDepthsMap(inv.tread_depths_json) || {};
+  const entries = labels.map(lbl => {
+    const key = Object.keys(map).find(k => k === lbl || k.split(" ×")[0] === lbl.split(" ×")[0]);
+    const raw = key ? map[key] : null;
+    const val = (raw !== null && raw !== undefined && String(raw).trim() !== "") ? Number(raw) : null;
+    return `${lbl.split(" ×")[0]} – ${val != null ? `${val}mm` : "—"}`;
+  });
+  const lines = [];
+  for (let i = 0; i < entries.length; i += 2) lines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
+  return lines;
+}
+/** If fitment_locations is empty but treads present, derive positions that have values */
+function deriveFitmentFromTreads(inv) {
+  const map = parseTreadDepthsMap(inv.tread_depths_json);
+  if (!map || typeof map !== "object") return null;
+  const labels = fitmentSchema(inv.vehicle_type, inv.tyre_count || 0).labels;
+  const chosen = labels.filter(lbl => {
+    const key = Object.keys(map).find(k => k === lbl || k.split(" ×")[0] === lbl.split(" ×")[0]);
+    const raw = key ? map[key] : null;
+    return raw !== null && raw !== undefined && String(raw).trim() !== "";
+  });
+  return chosen.length ? chosen.join(", ") : null;
+}
 
 /* =======================
    Dosage formula
@@ -190,9 +202,9 @@ function stateAbbrFromProfile(profile) {
 function displayInvoiceCode(inv, profile) {
   const fr = (profile?.franchisee_id || "FR").replace(/\s+/g, "");
   const st = stateAbbrFromProfile(profile);
-  const dt = parseDateFlexible(inv?.created_at || Date.now());
-  const mm = String(dt.getMonth()+1).padStart(2,"0");
-  const yy = String(dt.getFullYear()).slice(-2);
+  const dt = parseAssumingUTC(inv?.created_at || Date.now());
+  const mm = String(dt.getUTCMonth()+1).padStart(2,"0");
+  const yy = String(dt.getUTCFullYear()).slice(-2);
   const seq = String(inv?.id || 1).padStart(4,"0");
   return `${fr}/${st}/${seq}/${mm}${yy}`;
 }
@@ -218,30 +230,8 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, font
   });
   return y;
 }
-function parseTreadDepthsMap(maybe) {
-  if (!maybe) return null;
-  if (typeof maybe === "string") {
-    try { return JSON.parse(maybe); } catch { return null; }
-  }
-  if (typeof maybe === "object") return maybe;
-  return null;
-}
-function buildTreadLines(inv) {
-  const labels = fitmentSchema(inv.vehicle_type, inv.tyre_count || 0).labels;
-  const map = parseTreadDepthsMap(inv.tread_depths_json) || {};
-  const entries = labels.map(lbl => {
-    const key = Object.keys(map).find(k => k === lbl || k.split(" ×")[0] === lbl.split(" ×")[0]);
-    const val = key ? map[key] : null;
-    return `${lbl.split(" ×")[0]} – ${val != null && val !== "" ? `${val}mm` : "—"}`;
-  });
-  const lines = [];
-  for (let i = 0; i < entries.length; i += 2) {
-    lines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
-  }
-  return lines;
-}
 
-/** ====== Full invoice PDF with fixed zones, IST times, treads grid, non-overlap ====== */
+/** ====== Full invoice PDF with fixed zones, strict IST, treads grid, non-overlap ====== */
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const W = doc.internal.pageSize.getWidth();
@@ -249,17 +239,18 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   // Base metrics
   const M = 36;
-  const gapZ12 = 26;  // Zone 1 ↔ Zone 2 gap
-  const gapZ23 = 10;  // Zone 2 ↔ Zone 3 gap
-  const zoneGap = 12; // default small gap
+  const gapZ12 = 24;  // Zone 1 ↔ Zone 2
+  const gapZ23 = 10;  // Zone 2 ↔ Zone 3
+  const zoneGap = 10; // default small gap
   const lineH = 12;
 
   doc.setFont("helvetica", "normal");
 
   /** Zone 1 — Franchisee header */
   const headerTop = 40;
-  doc.setFontSize(15);
+  doc.setFontSize(15); try { doc.setFont(undefined,"bold"); } catch {}
   doc.text(profile?.name || "Franchisee", M, headerTop);
+  try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
   const addrLines = String(profile?.address || "Address not set").split(/\n|, /g).filter(Boolean);
   addrLines.slice(0,3).forEach((t,i) => doc.text(t, M, headerTop + 16 + i*lineH));
@@ -273,9 +264,14 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   drawSeparator(doc, headerTop + 46, W, M);
 
-  /** Zone 2 — Customer & Vehicle (left/right) */
+  /** Zone 2 — Left: Customer Details, Right: Vehicle Details */
   let y = headerTop + 46 + gapZ12;
-  doc.setFontSize(12); doc.text("Customer & Vehicle", M, y); doc.setFontSize(10.5);
+
+  // Left block
+  doc.setFontSize(12); try { doc.setFont(undefined,"bold"); } catch {}
+  doc.text("Customer Details", M, y);
+  try { doc.setFont(undefined,"normal"); } catch {}
+  doc.setFontSize(10.5);
   [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
@@ -285,16 +281,24 @@ function generateInvoicePDF(inv, profile, taxMode) {
     `Installer: ${inv.installer_name || ""}`
   ].forEach((t,i) => doc.text(t, M, y + 16 + i*lineH));
 
+  // Right block
   const xR = W/2 + 10; let yR = y;
-  doc.setFontSize(12); doc.text("Vehicle Details", xR, yR); doc.setFontSize(10.5);
+  doc.setFontSize(12); try { doc.setFont(undefined,"bold"); } catch {}
+  doc.text("Vehicle Details", xR, yR);
+  try { doc.setFont(undefined,"normal"); } catch {}
+  doc.setFontSize(10.5);
 
-  // Always show Fitment & Treads (mm)
+  // Ensure we have a fitment string if treads are present
+  const derivedFit = (!inv.fitment_locations || !String(inv.fitment_locations).trim()) ? deriveFitmentFromTreads(inv) : null;
+  const fitmentText = derivedFit || inv.fitment_locations || "";
+
   const treadLines = buildTreadLines(inv); // robust JSON + fallback to schema
   const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml||0)/inv.tyre_count)/25)*25 : null;
   const rightItems = [
     `Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
+    (fitmentText ? `Fitment: ${fitmentText}` : ""),
     "Fitment & Treads (mm):",
     ...treadLines,
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
@@ -309,16 +313,17 @@ function generateInvoicePDF(inv, profile, taxMode) {
   drawSeparator(doc, z2Bottom + gapZ23, W, M);
   let yAfter = z2Bottom + gapZ23 + 6;
 
-  /** Zone 3 — Amounts table (recompute to be safe) */
-  const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
+  /** Zone 3 — Amounts (recompute to be safe) */
+  const pml = Number(inv.price_per_ml || PRICE_PER_ML);
+  const baseRaw = Number(inv.dosage_ml || 0) * pml;
   const maxDisc = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
-  const discountUsed = Math.min(Number(inv.discount || 0), maxDisc);
-  const install = Number(inv.installation_fee || 0);
+  const discountUsed = Math.min(Math.max(0, Number(inv.discount || 0)), maxDisc);
+  const install = Math.max(0, Number(inv.installation_fee || 0));
   const base = Math.max(0, baseRaw - discountUsed + install);
-  let cgst=0, sgst=0, igst=0;
   const mode = (taxMode || inv.tax_mode) === "IGST" ? "IGST" : "CGST_SGST";
-  if (mode === "CGST_SGST") { cgst = (base * GST_PERCENT)/200; sgst = (base * GST_PERCENT)/200; }
-  else { igst = (base * GST_PERCENT)/100; }
+  const cgst = mode==="CGST_SGST" ? (base * GST_PERCENT)/200 : 0;
+  const sgst = mode==="CGST_SGST" ? (base * GST_PERCENT)/200 : 0;
+  const igst = mode==="IGST" ? (base * GST_PERCENT)/100 : 0;
   const gstTotal = cgst + sgst + igst;
   const grand = base + gstTotal;
 
@@ -327,10 +332,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
-      ["MRP per ml", inrRs(Number(inv.price_per_ml || PRICE_PER_ML))],
+      ["MRP per ml", inrRs(pml)],
       ["Gross (dosage × price)", inrRs(baseRaw)],
-      ["Discount (Rs.)", `-${inrRs(discountUsed)}`],
-      ["Installation Charges (Rs.)", inrRs(install)],
+      ["Discount (₹)", `-${inrRs(discountUsed)}`],
+      ["Installation Charges (₹)", inrRs(install)],
       ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
       ["CGST (9%)", inrRs(cgst)],
       ["SGST (9%)", inrRs(sgst)],
@@ -346,7 +351,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : yAfter + 140;
 
-  /** Mid-install confirmation block (between Zone 3 & Zone 4, equidistant) */
+  /** Mid-install confirmation block (between Zone 3 & Zone 4) */
   const midTitle = "Customer Mid-Install Confirmation";
   const midText = (() => {
     const when = inv.consent_signed_at ? formatIST(inv.consent_signed_at) : formatIST(inv.created_at || Date.now());
@@ -355,23 +360,24 @@ function generateInvoicePDF(inv, profile, taxMode) {
       `Consent timestamp: ${when}`
     ];
   })();
-  const blockTopPad = 10, blockBotPad = 10, blockSidePad = 10;
+  const blockPadY = 8, blockPadX = 8;
   const blockWidth = W - 2*M;
 
-  const z3Bottom = yAfter + 12;
+  const z3Bottom = yAfter + 8;
   drawSeparator(doc, z3Bottom, W, M);
-  let yBlock = z3Bottom + 12;
+  let yBlock = z3Bottom + 10;
 
   doc.setFontSize(11); try { doc.setFont(undefined, "bold"); } catch {}
-  doc.text(midTitle, M, yBlock); yBlock += 14; try { doc.setFont(undefined, "normal"); } catch {}
+  doc.text(midTitle, M, yBlock); yBlock += 12; try { doc.setFont(undefined, "normal"); } catch {}
   doc.setDrawColor(220); doc.setLineWidth(0.8);
-  doc.rect(M, yBlock, blockWidth, blockTopPad + blockBotPad + (midText.length * 12));
-  let yy = yBlock + blockTopPad + 2;
+  const blockHeight = blockPadY*2 + (midText.length * 12);
+  doc.rect(M, yBlock, blockWidth, blockHeight);
+  let yy = yBlock + blockPadY + 2;
   doc.setFontSize(10.5);
-  midText.forEach(t => { doc.text(t, M + blockSidePad, yy); yy += 12; });
-  yAfter = yBlock + blockTopPad + blockBotPad + (midText.length * 12);
-  drawSeparator(doc, yAfter + 12, W, M);
-  yAfter += 24;
+  midText.forEach(t => { doc.text(t, M + blockPadX, yy); yy += 12; });
+  yAfter = yBlock + blockHeight;
+  drawSeparator(doc, yAfter + 10, W, M);
+  yAfter += 20;
 
   /** Zone 4 — Customer Declaration */
   const maxW = W - M*2;
@@ -382,7 +388,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter, maxW, 11, 9.0);
   drawSeparator(doc, yAfter + 6, W, M);
-  yAfter += 18;
+  yAfter += 16;
 
   /** Zone 5 — Terms & Conditions */
   const termsItems = [
@@ -392,20 +398,20 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter, maxW, 11, 9.0);
   drawSeparator(doc, yAfter + 6, W, M);
-  yAfter += 18;
+  yAfter += 16;
 
-  /** Zone 6 — Signature boxes (bottom-preferred; auto-lift to avoid overlap) */
+  /** Zone 6 — Signature boxes (never clip) */
   const boxWidth = 260, boxHeight = 66;
-  const preferredBottomGap = 68;
-  const bottomPreferredY = H - preferredBottomGap - boxHeight;
-  const nonOverlapY = Math.max(yAfter, M + 12);
-  const boxY = Math.max(bottomPreferredY, nonOverlapY);
+  const bottomMargin = 24; // hard clamp
+  const maxY = H - bottomMargin - boxHeight; // must not exceed
+  const minY = Math.max(yAfter, M + 12);
+  const boxY = Math.min(maxY, minY);
 
   // Left box: Installer Signature & Stamp
   doc.setDrawColor(0); doc.setLineWidth(0.8);
   doc.rect(M, boxY, boxWidth, boxHeight);
   doc.setFontSize(10); doc.text("Installer Signature & Stamp", M + 10, boxY + 14);
-  // baseline to sign on
+  // baseline
   doc.line(M + 10, boxY + boxHeight - 14, M + boxWidth - 10, boxY + boxHeight - 14);
 
   // Right box: Customer Accepted & Confirmed
@@ -420,7 +426,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   // baseline
   doc.line(rightX + 10, boxY + boxHeight - 14, rightX + boxWidth - 10, boxY + boxHeight - 14);
 
-  // Optional signature image (kept inside box)
+  // Optional signature image inside box
   if (inv.customer_signature) {
     try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, boxY + 18, 140, 34); } catch {}
   }
@@ -733,6 +739,15 @@ function RecentInvoices({ token, profile }) {
   const [summary, setSummary] = useState(null);
   const headersAuth = { Authorization: `Bearer ${token}` };
 
+  const enrichRow = useCallback((r) => {
+    // derive fitment from treads if needed (for table display only)
+    if ((!r.fitment_locations || !String(r.fitment_locations).trim()) && r.tread_depths_json) {
+      const derived = deriveFitmentFromTreads(r);
+      if (derived) r.fitment_locations = derived;
+    }
+    return r;
+  }, []);
+
   const fetchRows = useCallback(() => {
     setLoading(true);
     const params = new URLSearchParams();
@@ -743,9 +758,9 @@ function RecentInvoices({ token, profile }) {
 
     fetch(`${API_URL}/api/invoices?${params.toString()}`, { headers: headersAuth })
       .then(r => r.json()).then(data => {
-        const arr = Array.isArray(data) ? data : [];
+        const arr = (Array.isArray(data) ? data : []).map(enrichRow);
         // numeric sort by id DESC; tie-break by created_at
-        arr.sort((a,b) => (Number(b.id||0) - Number(a.id||0)) || ((new Date(b.created_at)) - (new Date(a.created_at))));
+        arr.sort((a,b) => (Number(b.id||0) - Number(a.id||0)) || (parseAssumingUTC(b.created_at) - parseAssumingUTC(a.created_at)));
         setRows(arr);
         setLoading(false);
       })
@@ -753,7 +768,7 @@ function RecentInvoices({ token, profile }) {
 
     fetch(`${API_URL}/api/summary?${params.toString()}`, { headers: headersAuth })
       .then(r => r.json()).then(setSummary).catch(() => setSummary(null));
-  }, [q, from, to, token]);
+  }, [q, from, to, token, enrichRow]);
 
   useEffect(() => { const t = setTimeout(fetchRows, 400); return () => clearTimeout(t); }, [q, from, to, fetchRows]);
   useEffect(() => { fetchRows(); const onU = () => fetchRows(); window.addEventListener("invoices-updated", onU); return () => window.removeEventListener("invoices-updated", onU); }, [fetchRows]);
@@ -1046,7 +1061,10 @@ function FranchiseeApp({ token, onLogout }) {
     const consentSnapshot = `${consentSnapshotBase}\n[AUDIT] ${JSON.stringify(audit)}`;
     const consentSignedAt = (consentMeta && consentMeta.agreedAt) || new Date().toISOString();
 
-    const saved = await saveInvoiceToServer({
+    const treadMinVal = Math.min(...Object.values(treadByTyre).map(v => num(v, 0)));
+    const fitmentText = textFromFitState(fit) || deriveFitmentFromTreads({ vehicle_type: vehicleType, tyre_count: tCount, tread_depths_json: treadByTyre }) || null;
+
+    const payload = {
       // Customer & Vehicle
       customer_name: customerName,
       customer_address: customerAddress || null,
@@ -1061,10 +1079,10 @@ function FranchiseeApp({ token, onLogout }) {
       tyre_width_mm: num(tyreWidth),
       aspect_ratio: num(aspectRatio),
       rim_diameter_in: num(rimDiameter),
-      fitment_locations: textFromFitState(fit) || null,
+      fitment_locations: fitmentText,
 
       // Treads
-      tread_depth_mm: Math.min(...Object.values(treadByTyre).map(v => num(v, 0))),
+      tread_depth_mm: treadMinVal,
       tread_depths_json: JSON.stringify(treadByTyre),
 
       // Dosage (USED — computed or manual)
@@ -1094,15 +1112,59 @@ function FranchiseeApp({ token, onLogout }) {
       signed_at: consentSignedAt,
 
       gps_lat: null, gps_lng: null, customer_code: null
-    });
+    };
+
+    const saved = await saveInvoiceToServer(payload);
 
     if (saved?.id) {
       alert(`Invoice saved. ID: ${saved.id}`);
 
-      // Fetch full to print
-      const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
+      // Fetch full to print, then **safety-merge** local values if server misses them
+      let inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
-      if (inv) generateInvoicePDF(inv, profile, inv.tax_mode || "CGST_SGST");
+      if (!inv) inv = {};
+
+      // Safety net merge for immediate PDF accuracy
+      const ensure = (v, fallback) => {
+        if (v === undefined || v === null || (typeof v === "number" && !isFinite(v))) return fallback;
+        if (typeof v === "string" && v.trim() === "") return fallback;
+        return v;
+      };
+      const printable = {
+        ...inv,
+        // Critical pricing & tax
+        price_per_ml: ensure(inv?.price_per_ml, PRICE_PER_ML),
+        discount: ensure(inv?.discount, discountUsed),
+        installation_fee: ensure(inv?.installation_fee, installation),
+        tax_mode: ensure(inv?.tax_mode, mode),
+        gst_percentage: ensure(inv?.gst_percentage, GST_PERCENT),
+        total_before_gst: ensure(inv?.total_before_gst, amountBeforeTax),
+        gst_amount: ensure(inv?.gst_amount, gstTotal),
+        total_with_gst: ensure(inv?.total_with_gst, grand),
+        cgst_amount: ensure(inv?.cgst_amount, cgst),
+        sgst_amount: ensure(inv?.sgst_amount, sgst),
+        igst_amount: ensure(inv?.igst_amount, igst),
+
+        // Fitment & treads
+        fitment_locations: ensure(inv?.fitment_locations, fitmentText),
+        tread_depth_mm: ensure(inv?.tread_depth_mm, treadMinVal),
+        tread_depths_json: ensure(inv?.tread_depths_json, treadByTyre),
+
+        // Signatures
+        customer_signature: ensure(inv?.customer_signature, signatureData),
+        consent_signed_at: ensure(inv?.consent_signed_at, consentSignedAt),
+        signed_at: ensure(inv?.signed_at, consentSignedAt),
+
+        // Dosage, size, etc.
+        dosage_ml: ensure(inv?.dosage_ml, totalUsed),
+        tyre_count: ensure(inv?.tyre_count, tCount),
+        tyre_width_mm: ensure(inv?.tyre_width_mm, num(tyreWidth)),
+        aspect_ratio: ensure(inv?.aspect_ratio, num(aspectRatio)),
+        rim_diameter_in: ensure(inv?.rim_diameter_in, num(rimDiameter)),
+        vehicle_type: ensure(inv?.vehicle_type, vehicleType),
+      };
+
+      generateInvoicePDF(printable, profile, printable.tax_mode || "CGST_SGST");
 
       // quick share helpers (text only)
       const subject = encodeURIComponent(`MaxTT Invoice #${saved.id}`);
