@@ -1,4 +1,4 @@
-// src/App.js — Consent → Review & Confirm (manual override), outlier checks, strict IST, robust treads/fitment, no watermark
+// src/App.js — Consent → Review & Confirm (manual override), outlier checks, strict IST, robust treads/fitment, signatures Plan A, HTV caps
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
@@ -13,9 +13,6 @@ const API_KEY = "supersecret123"; // frontend key (backend also checks its own s
 const PRICE_PER_ML = 4.5;
 const GST_PERCENT  = 18;
 const DISCOUNT_MAX_PCT = 30;
-
-// Strict size validation limits (hard blocks)
-const SIZE_LIMITS = { widthMin: 90, widthMax: 445, aspectMin: 25, aspectMax: 95, rimMin: 8, rimMax: 25 };
 
 // Per-tyre outlier thresholds (yellow/red) — SOFT checks (confirm / double-confirm)
 const OUTLIER_THRESHOLDS = {
@@ -34,6 +31,15 @@ const VEHICLE_CFG = {
   "6-Wheeler (Bus/LTV)":            { k: 3.0,  bufferPct: 0.05, defaultTyres: 6, options: [6] },
   "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.0, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18] }
 };
+
+/* =======================
+   Dynamic size limits
+   ======================= */
+const SIZE_LIMITS_DEFAULT = { widthMin: 90, widthMax: 445, aspectMin: 25, aspectMax: 95, rimMin: 8, rimMax: 25 };
+const SIZE_LIMITS_HTV     = { widthMin: 90, widthMax: 1200, aspectMin: 10, aspectMax: 100, rimMin: 8, rimMax: 63 };
+function sizeLimitsForVehicle(vehicleType) {
+  return vehicleType === "HTV (>6 wheels: Trucks/Trailers/Mining)" ? SIZE_LIMITS_HTV : SIZE_LIMITS_DEFAULT;
+}
 
 // Per-category min tread (mm)
 const TREAD_MIN_MM = {
@@ -89,12 +95,10 @@ function parseAssumingUTC(dateLike) {
   if (!dateLike) return new Date();
   let s = String(dateLike).trim();
   if (!s) return new Date();
-  // normalize separator
   if (!s.includes("T") && s.includes(" ")) s = s.replace(" ", "T");
-  const src = hasExplicitTZ(s) ? s : (s + "Z"); // force UTC if naive
+  const src = hasExplicitTZ(s) ? s : (s + "Z");
   const d = new Date(src);
   if (!isNaN(d)) return d;
-  // last resort: try native parse as-is
   return new Date(s);
 }
 const pad2 = (x) => String(x).padStart(2, "0");
@@ -140,7 +144,6 @@ function parseTreadDepthsMap(maybe) {
   if (typeof maybe === "object") return maybe;
   return null;
 }
-/** Build paired lines like "Front Left – 4.5mm     Front Right – 4.6mm" for PDF */
 function buildTreadLines(inv) {
   const labels = fitmentSchema(inv.vehicle_type, inv.tyre_count || 0).labels;
   const map = parseTreadDepthsMap(inv.tread_depths_json) || {};
@@ -148,13 +151,10 @@ function buildTreadLines(inv) {
     const key = Object.keys(map).find(k => k === lbl || k.split(" ×")[0] === lbl.split(" ×")[0]);
     const raw = key ? map[key] : null;
     const val = (raw !== null && raw !== undefined && String(raw).trim() !== "") ? Number(raw) : null;
-    return `${lbl.split(" ×")[0]} – ${val != null ? `${val}mm` : "—"}`;
+    return { pos: lbl.split(" ×")[0], val };
   });
-  const lines = [];
-  for (let i = 0; i < entries.length; i += 2) lines.push(entries[i] + (entries[i+1] ? `     ${entries[i+1]}` : ""));
-  return lines;
+  return entries;
 }
-/** If fitment_locations is empty but treads present, derive positions that have values */
 function deriveFitmentFromTreads(inv) {
   const map = parseTreadDepthsMap(inv.tread_depths_json);
   if (!map || typeof map !== "object") return null;
@@ -165,6 +165,20 @@ function deriveFitmentFromTreads(inv) {
     return raw !== null && raw !== undefined && String(raw).trim() !== "";
   });
   return chosen.length ? chosen.join(", ") : null;
+}
+function impliedInstalledCount(fitState, vehicleType, tyreCount) {
+  const schema = fitmentSchema(vehicleType, tyreCount);
+  const rearEach = schema.rearEach || 0;
+  const labels = schema.labels;
+  let count = 0;
+  for (const label of labels) {
+    const checked = !!fitState[label];
+    if (!checked) continue;
+    if (/Rear Left ×\d+/.test(label)) count += rearEach;
+    else if (/Rear Right ×\d+/.test(label)) count += rearEach;
+    else count += 1;
+  }
+  return count;
 }
 
 /* =======================
@@ -231,7 +245,7 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 11, font
   return y;
 }
 
-/** ====== Full invoice PDF with fixed zones, strict IST, treads grid, non-overlap ====== */
+/** ====== Full invoice PDF with fixed zones, strict IST, mini-table for treads, signatures Plan A ====== */
 function generateInvoicePDF(inv, profile, taxMode) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const W = doc.internal.pageSize.getWidth();
@@ -241,7 +255,6 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const M = 36;
   const gapZ12 = 24;  // Zone 1 ↔ Zone 2
   const gapZ23 = 10;  // Zone 2 ↔ Zone 3
-  const zoneGap = 10; // default small gap
   const lineH = 12;
 
   doc.setFont("helvetica", "normal");
@@ -288,28 +301,65 @@ function generateInvoicePDF(inv, profile, taxMode) {
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
 
-  // Ensure we have a fitment string if treads are present
-  const derivedFit = (!inv.fitment_locations || !String(inv.fitment_locations).trim()) ? deriveFitmentFromTreads(inv) : null;
-  const fitmentText = derivedFit || inv.fitment_locations || "";
+  // Build Fitment & Treads mini-table rows
+  const treadRows = buildTreadLines(inv); // [{pos, val}]
+  const installedCount = (() => {
+    // prefer fitment_locations derived count if present, else tread-based derivation
+    const derived = deriveFitmentFromTreads(inv);
+    const tmpFit = {};
+    const labels = fitmentSchema(inv.vehicle_type, inv.tyre_count || 0).labels;
+    for (const lbl of labels) tmpFit[lbl] = false;
+    if (inv.fitment_locations) {
+      inv.fitment_locations.split(",").map(s => s.trim()).forEach(lbl => { if (lbl) tmpFit[lbl] = true; });
+    } else if (derived) {
+      derived.split(",").map(s => s.trim()).forEach(lbl => { if (lbl) tmpFit[lbl] = true; });
+    }
+    return impliedInstalledCount(tmpFit, inv.vehicle_type, inv.tyre_count || 0);
+  })();
 
-  const treadLines = buildTreadLines(inv); // robust JSON + fallback to schema
-  const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml||0)/inv.tyre_count)/25)*25 : null;
-  const rightItems = [
+  // Right details header lines
+  const rightHeader = [
     `Category: ${inv.vehicle_type || ""}`,
     `Tyres: ${inv.tyre_count ?? ""}`,
     `Tyre Size: ${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`,
-    (fitmentText ? `Fitment: ${fitmentText}` : ""),
-    "Fitment & Treads (mm):",
-    ...treadLines,
+  ];
+  rightHeader.forEach((t,i) => doc.text(t, xR, yR + 16 + i*lineH));
+  let yRH = yR + 16 + rightHeader.length*lineH;
+
+  // Mini-table title
+  doc.setFontSize(11); try { doc.setFont(undefined,"bold"); } catch {}
+  doc.text("Fitment & Tread Depth (mm)", xR, yRH + 12);
+  try { doc.setFont(undefined,"normal"); } catch {}
+  doc.setFontSize(10.5);
+
+  // Render two-column compact table (borderless)
+  const posColX = xR;
+  const valColX = W - 50; // right-aligned value
+  let yTbl = yRH + 12 + 12;
+  doc.setFontSize(10.5);
+  treadRows.forEach(({pos, val}) => {
+    doc.text(pos, posColX, yTbl);
+    doc.text(val != null ? `${val} mm` : "—", valColX, yTbl, { align: "right" });
+    yTbl += lineH;
+  });
+
+  // Installed Tyres: N
+  doc.setFontSize(10);
+  doc.text(`Installed Tyres: ${installedCount}`, xR, yTbl + 8);
+  yTbl += 8 + lineH;
+
+  // Per-tyre & Total dosage lines
+  const perTyre = inv.tyre_count ? Math.round((Number(inv.dosage_ml||0)/inv.tyre_count)/25)*25 : null;
+  const dosageLines = [
     `Per-tyre Dosage: ${perTyre ?? ""} ml`,
-    `Total Dosage: ${inv.dosage_ml ?? ""} ml`,
-  ].filter(Boolean);
-  rightItems.forEach((t,i) => doc.text(t, xR, yR + 16 + i*lineH));
+    `Total Dosage: ${inv.dosage_ml ?? ""} ml`
+  ];
+  dosageLines.forEach((t,i) => doc.text(t, xR, yTbl + i*lineH));
+  const z2RightBottom = yTbl + dosageLines.length*lineH;
 
   // Baseline for next zone (Zone 3)
-  const z2LeftH  = y + 16 + 6*lineH;
-  const z2RightH = yR + 16 + (rightItems.length)*lineH;
-  const z2Bottom = Math.max(z2LeftH, z2RightH);
+  const z2LeftBottom  = y + 16 + 6*lineH;
+  const z2Bottom = Math.max(z2LeftBottom, z2RightBottom);
   drawSeparator(doc, z2Bottom + gapZ23, W, M);
   let yAfter = z2Bottom + gapZ23 + 6;
 
@@ -334,8 +384,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
       ["MRP per ml", inrRs(pml)],
       ["Gross (dosage × price)", inrRs(baseRaw)],
-      ["Discount (₹)", `-${inrRs(discountUsed)}`],
-      ["Installation Charges (₹)", inrRs(install)],
+      ["Discount", `-${inrRs(discountUsed)}`],
+      ["Installation Charges", inrRs(install)],
       ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
       ["CGST (9%)", inrRs(cgst)],
       ["SGST (9%)", inrRs(sgst)],
@@ -351,7 +401,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : yAfter + 140;
 
-  /** Mid-install confirmation block (between Zone 3 & Zone 4) */
+  /** Mid-install confirmation block */
   const midTitle = "Customer Mid-Install Confirmation";
   const midText = (() => {
     const when = inv.consent_signed_at ? formatIST(inv.consent_signed_at) : formatIST(inv.created_at || Date.now());
@@ -397,13 +447,13 @@ function generateInvoicePDF(inv, profile, taxMode) {
     "By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions."
   ];
   yAfter = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter, maxW, 11, 9.0);
-  drawSeparator(doc, yAfter + 6, W, M);
-  yAfter += 16;
+  // (Plan A) Do NOT draw a separator above signatures; just add a small spacer:
+  yAfter += 10;
 
-  /** Zone 6 — Signature boxes (never clip) */
-  const boxWidth = 260, boxHeight = 66;
-  const bottomMargin = 24; // hard clamp
-  const maxY = H - bottomMargin - boxHeight; // must not exceed
+  /** Zone 6 — Signature boxes (Plan A: shorter & lower, no separator above) */
+  const boxWidth = 260, boxHeight = 60;
+  const bottomMargin = 14; // closer to page bottom
+  const maxY = H - bottomMargin - boxHeight;
   const minY = Math.max(yAfter, M + 12);
   const boxY = Math.min(maxY, minY);
 
@@ -418,17 +468,14 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const rightX = W - M - boxWidth;
   doc.rect(rightX, boxY, boxWidth, boxHeight);
   doc.text("Customer Accepted & Confirmed", rightX + 10, boxY + 14);
-  // Signed at (IST)
   if (inv.signed_at) {
     doc.setFontSize(9.5);
     doc.text(`Signed at: ${formatIST(inv.signed_at)}`, rightX + 10, boxY + boxHeight - 26);
   }
-  // baseline
   doc.line(rightX + 10, boxY + boxHeight - 14, rightX + boxWidth - 10, boxY + boxHeight - 14);
 
-  // Optional signature image inside box
   if (inv.customer_signature) {
-    try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, boxY + 18, 140, 34); } catch {}
+    try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, boxY + 18, 140, 30); } catch {}
   }
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
@@ -550,7 +597,7 @@ function SignaturePad({ open, onClose, onSave }) {
 }
 
 /* =======================
-   Confirmation Modal (installer review + manual override)
+   Confirmation Modal (installer review + manual override + fitment mismatch exception)
    ======================= */
 function computeOutlierLevel(perTyreMl, vehicleType) {
   const t = OUTLIER_THRESHOLDS[vehicleType];
@@ -568,6 +615,11 @@ function ConfirmationModal({ open, onClose, onConfirm, data }) {
   const [overrideAck, setOverrideAck] = useState(false);
   const [doubleConfirm, setDoubleConfirm] = useState(false);
 
+  // Fitment mismatch fields
+  const [mismatchReason, setMismatchReason] = useState("");
+  const [mismatchNote, setMismatchNote] = useState("");
+  const [mismatchAck, setMismatchAck] = useState(false);
+
   useEffect(() => {
     if (open) {
       setUseManual(false);
@@ -577,65 +629,106 @@ function ConfirmationModal({ open, onClose, onConfirm, data }) {
       setOverrideNote("");
       setOverrideAck(false);
       setDoubleConfirm(false);
+
+      setMismatchReason("");
+      setMismatchNote("");
+      setMismatchAck(false);
     }
   }, [open]);
 
   if (!open) return null;
+
   const {
-    vehicleType, tyreCount, tyreWidth, aspectRatio, rimDiameter,
-    perTyreMl, totalMl, baseRaw, discountUsed, installation,
-    mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand
+    vehicleType, tyreCount, impliedCount,
+    tyreWidth, aspectRatio, rimDiameter,
+    computedPerTyre, pricePerMl, discountCapPct, enteredDiscount,
+    installation, taxMode, gstPercent,
+    outlierLevelComputed
   } = data || {};
 
-  // Outlier levels
-  const computedLevel = computeOutlierLevel(perTyreMl, vehicleType);
+  const mismatch = Number(impliedCount) !== Number(tyreCount);
+  const diff = Math.abs(Number(impliedCount) - Number(tyreCount));
+  const needsDoubleConfirm = mismatch && (diff >= 2 || vehicleType.startsWith("HTV"));
+  const perTyreBase = computedPerTyre;
 
-  const manualVal = Number(manualPerTyre || 0);
-  const manualLevel = useManual ? computeOutlierLevel(manualVal, vehicleType) : "none";
-  const levelUsed = useManual ? manualLevel : computedLevel;
+  // The per-tyre value we will use (manual or computed)
+  const finalPerTyre = useManual ? Number(manualPerTyre || 0) : perTyreBase;
+  // The tyre count used for totals: if mismatch, require manual; totals use implied count
+  const countUsed = mismatch ? Number(impliedCount) : Number(tyreCount);
 
-  const levelBanner = levelUsed === "red"
+  // Recompute price/tax preview for the *used* plan
+  const baseRaw = Number(finalPerTyre || 0) * Number(countUsed || 0) * Number(pricePerMl || 0);
+  const maxDisc = Math.round((baseRaw * Number(discountCapPct || 0)) / 100);
+  const discountUsed = Math.min(Math.max(0, Math.round(Number(enteredDiscount || 0))), maxDisc);
+  const amountBeforeTax = Math.max(0, baseRaw - discountUsed + Math.max(0, Number(installation || 0)));
+  const mode = taxMode === "IGST" ? "IGST" : "CGST_SGST";
+  const cgst = mode==="CGST_SGST" ? (amountBeforeTax * Number(gstPercent || 0))/200 : 0;
+  const sgst = mode==="CGST_SGST" ? (amountBeforeTax * Number(gstPercent || 0))/200 : 0;
+  const igst = mode==="IGST" ? (amountBeforeTax * Number(gstPercent || 0))/100 : 0;
+  const gstTotal = cgst + sgst + igst;
+  const grand = amountBeforeTax + gstTotal;
+
+  const outlierLevelManual = useManual ? computeOutlierLevel(finalPerTyre, vehicleType) : "none";
+  const levelUsed = useManual ? outlierLevelManual : outlierLevelComputed;
+
+  const mismatchBanner = mismatch
+    ? { bg: "#eef5ff", bd: "#a7c6ff", icon: "ℹ️", text: `Fitment count (${impliedCount}) ≠ Tyres selected (${tyreCount}). To proceed, enable Manual Dosage Override and complete the exception fields. Totals will use Installed Tyres = ${impliedCount}.` }
+    : null;
+
+  const outlierBanner = levelUsed === "red"
     ? { bg: "#fdecea", bd: "#f5c2c0", icon: "⛔", text: "Extreme dosage for this vehicle class. Double-confirmation required to proceed." }
     : levelUsed === "yellow"
       ? { bg: "#fff8e1", bd: "#ffe08a", icon: "⚠️", text: "Unusual dosage for this vehicle class. Please review carefully before saving." }
       : null;
 
-  const finalPerTyre = useManual ? manualVal : perTyreMl;
-  const finalTotal   = finalPerTyre * Number(tyreCount || 0);
+  // Confirm rules:
+  // - If mismatch: must use manual + mismatch fields + (double confirm if big diff/HTV).
+  // - If no mismatch: allow either computed or manual (but manual requires its own reason/chart/ack).
+  const needManualForMismatch = mismatch;
+  const manualBlockers = useManual ? (Number(manualPerTyre) > 0 && overrideReason && chartVersion && overrideAck) : false;
+  const mismatchBlockers = !needManualForMismatch || (useManual && mismatchReason && mismatchAck);
 
-  // share text
+  const canConfirm =
+    (!needManualForMismatch
+      ? (!useManual || manualBlockers)
+      : (useManual && manualBlockers && mismatchBlockers))
+    && (!needsDoubleConfirm || doubleConfirm);
+
   const shareText =
 `MaxTT Invoice (preview)
-Vehicle: ${vehicleType}, Tyres: ${tyreCount}
+Vehicle: ${vehicleType}, Tyres selected: ${tyreCount}, Installed Tyres (Fitment): ${impliedCount}
 Size: ${tyreWidth}/${aspectRatio} R${rimDiameter}
 Dosage per tyre: ${finalPerTyre} ml
-Total dosage: ${finalTotal} ml
+Total dosage: ${Number(finalPerTyre||0) * Number(countUsed||0)} ml
 Amount before GST: ${inrRs(amountBeforeTax)}
 GST: ${inrRs(gstTotal)}
 Grand Total: ${inrRs(grand)}
 Tax Mode: ${mode}`;
 
-  const canConfirm =
-    (!useManual || (manualVal > 0 && overrideReason && chartVersion && overrideAck)) &&
-    (levelUsed !== "red" || doubleConfirm);
-
   return (
     <div style={modalWrap}>
-      <div style={{ ...modalBox, maxWidth: 820, fontFamily: '"Poppins",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif' }}>
+      <div style={{ ...modalBox, maxWidth: 860, fontFamily: '"Poppins",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif' }}>
         <h3 style={{ marginTop: 0 }}>Review & Confirm Before Save</h3>
 
-        {levelBanner && (
-          <div style={{ background: levelBanner.bg, border: `1px solid ${levelBanner.bd}`, padding: 10, borderRadius: 6, marginBottom: 10 }}>
-            {levelBanner.icon} <strong>{levelBanner.text}</strong>
+        {mismatchBanner && (
+          <div style={{ background: mismatchBanner.bg, border: `1px solid ${mismatchBanner.bd}`, padding: 10, borderRadius: 6, marginBottom: 10 }}>
+            {mismatchBanner.icon} <strong>{mismatchBanner.text}</strong>
+          </div>
+        )}
+        {outlierBanner && (
+          <div style={{ background: outlierBanner.bg, border: `1px solid ${outlierBanner.bd}`, padding: 10, borderRadius: 6, marginBottom: 10 }}>
+            {outlierBanner.icon} <strong>{outlierBanner.text}</strong>
           </div>
         )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <div><strong>Vehicle Category:</strong> {vehicleType}</div>
-          <div><strong>Tyres:</strong> {tyreCount}</div>
+          <div><strong>Tyres (selected):</strong> {tyreCount}</div>
+          <div><strong>Installed Tyres (Fitment):</strong> {impliedCount}</div>
           <div><strong>Tyre Size:</strong> {tyreWidth}/{aspectRatio} R{rimDiameter}</div>
-          <div><strong>Per-tyre Dosage (computed):</strong> {perTyreMl} ml</div>
-          <div><strong>Total Dosage (computed):</strong> {totalMl} ml</div>
+          <div><strong>Per-tyre Dosage (computed):</strong> {perTyreBase} ml</div>
+          <div><strong>Per-tyre Dosage (final):</strong> {finalPerTyre} ml</div>
+          <div><strong>Total Dosage (final):</strong> {Number(finalPerTyre||0) * Number(countUsed||0)} ml</div>
           <div><strong>Gross (dosage × price):</strong> {inrRs(baseRaw)}</div>
           <div><strong>Discount:</strong> -{inrRs(discountUsed)}</div>
           <div><strong>Installation:</strong> {inrRs(installation)}</div>
@@ -656,8 +749,8 @@ Tax Mode: ${mode}`;
               <div>
                 <label>Per-tyre dosage (ml)</label>
                 <input value={manualPerTyre} onChange={e=>setManualPerTyre(e.target.value.replace(/[^\d.]/g,""))}
-                       placeholder={`${perTyreMl}`} />
-                {manualVal <= 0 && <div style={{ color: "crimson", fontSize: 12 }}>Enter a valid number &gt; 0</div>}
+                       placeholder={`${perTyreBase}`} />
+                {Number(manualPerTyre) <= 0 && <div style={{ color: "crimson", fontSize: 12 }}>Enter a valid number &gt; 0</div>}
               </div>
               <div>
                 <label>Chart/version</label>
@@ -684,20 +777,50 @@ Tax Mode: ${mode}`;
                 I confirm this manual value is taken from the official chart.
               </label>
               {/* Manual outlier indicator */}
-              {manualLevel !== "none" && (
-                <div style={{ gridColumn: "1 / span 2", fontSize: 12, color: manualLevel==="red" ? "#a40000" : "#7a5900" }}>
-                  Manual dosage is {manualLevel.toUpperCase()} outlier for {vehicleType}.
+              {useManual && outlierBanner && (
+                <div style={{ gridColumn: "1 / span 2", fontSize: 12, color: levelUsed==="red" ? "#a40000" : "#7a5900" }}>
+                  Manual dosage is {levelUsed.toUpperCase()} outlier for {vehicleType}.
                 </div>
               )}
             </div>
           )}
         </div>
 
-        {/* Double-confirm for RED outliers */}
-        {levelUsed === "red" && (
+        {/* Fitment mismatch exception fields */}
+        {mismatch && (
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px dashed #ddd" }}>
+            <strong>Fitment–Tyres Mismatch Exception</strong>
+            {!useManual && <div style={{ color: "crimson", marginTop: 6 }}>Enable <em>Manual Dosage Override</em> above to proceed.</div>}
+            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <label>Mismatch reason</label>
+                <select value={mismatchReason} onChange={e=>setMismatchReason(e.target.value)} disabled={!useManual}>
+                  <option value="">Select…</option>
+                  <option>Partial install (front only / rear only)</option>
+                  <option>Spare not serviced</option>
+                  <option>Wheel inaccessible / damaged</option>
+                  <option>OTR/HTV chart-specific exception</option>
+                  <option>Emergency completion</option>
+                  <option>Other</option>
+                </select>
+              </div>
+              <div>
+                <label>Note (optional)</label>
+                <input value={mismatchNote} onChange={e=>setMismatchNote(e.target.value)} disabled={!useManual} placeholder="Short note…" />
+              </div>
+              <label style={{ gridColumn: "1 / span 2", display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={mismatchAck} onChange={(e)=>setMismatchAck(e.target.checked)} disabled={!useManual} />
+                I acknowledge that Fitment ({impliedCount}) differs from Tyres selected ({tyreCount}), and totals will use Installed Tyres.
+              </label>
+            </div>
+          </div>
+        )}
+
+        {/* Double-confirm for RED outliers or large mismatch */}
+        {(levelUsed === "red" || needsDoubleConfirm) && (
           <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, background: "#fdecea", border: "1px solid #f5c2c0", padding: 8, borderRadius: 6 }}>
             <input type="checkbox" checked={doubleConfirm} onChange={(e)=>setDoubleConfirm(e.target.checked)} />
-            I understand this is an **extreme** dosage value and still confirm it is correct.
+            I understand this is a high-risk configuration (extreme dosage and/or large fitment mismatch) and still confirm it is correct.
           </label>
         )}
 
@@ -710,14 +833,25 @@ Tax Mode: ${mode}`;
           <button
             onClick={() => onConfirm({
               shareText,
+              // manual override fields
               useManual,
-              manualPerTyre: useManual ? manualVal : null,
-              outlier_level: levelUsed,
+              manualPerTyre: useManual ? Number(manualPerTyre || 0) : null,
               override_reason: useManual ? overrideReason : null,
               override_chart_version: useManual ? chartVersion : null,
               override_note: useManual ? overrideNote : null,
-              computed_per_tyre: perTyreMl,
-              computed_total: totalMl
+              override_ack: useManual ? overrideAck : false,
+              // mismatch audit fields
+              fitment_mismatch: mismatch,
+              fitment_mismatch_reason: mismatch ? mismatchReason : null,
+              fitment_mismatch_note: mismatch ? mismatchNote : null,
+              fitment_mismatch_ack: mismatch ? mismatchAck : false,
+              // computed context
+              outlier_level: levelUsed,
+              computed_per_tyre: perTyreBase,
+              implied_installed_count: Number(impliedCount),
+              tyres_selected: Number(tyreCount),
+              // preview totals for reference
+              preview_amounts: { baseRaw, discountUsed, amountBeforeTax, gstTotal, grand }
             })}
             disabled={!canConfirm}
             style={{ background: canConfirm ? "#0a7" : "#8fa", color: "#fff", border: "none", padding: "6px 12px", borderRadius: 6 }}
@@ -740,7 +874,6 @@ function RecentInvoices({ token, profile }) {
   const headersAuth = { Authorization: `Bearer ${token}` };
 
   const enrichRow = useCallback((r) => {
-    // derive fitment from treads if needed (for table display only)
     if ((!r.fitment_locations || !String(r.fitment_locations).trim()) && r.tread_depths_json) {
       const derived = deriveFitmentFromTreads(r);
       if (derived) r.fitment_locations = derived;
@@ -759,7 +892,6 @@ function RecentInvoices({ token, profile }) {
     fetch(`${API_URL}/api/invoices?${params.toString()}`, { headers: headersAuth })
       .then(r => r.json()).then(data => {
         const arr = (Array.isArray(data) ? data : []).map(enrichRow);
-        // numeric sort by id DESC; tie-break by created_at
         arr.sort((a,b) => (Number(b.id||0) - Number(a.id||0)) || (parseAssumingUTC(b.created_at) - parseAssumingUTC(a.created_at)));
         setRows(arr);
         setLoading(false);
@@ -894,7 +1026,7 @@ function FranchiseeApp({ token, onLogout }) {
   const [tyreWidth, setTyreWidth] = useState("");
   const [aspectRatio, setAspectRatio] = useState("");
   const [rimDiameter, setRimDiameter] = useState("");
-  const [fit, setFit] = useState(() => { const m = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => m[l] = false); return m; });
+  const [fit, setFit] = useState(() => { const m = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => m[l] = true); return m; }); // pre-check all
   const [treadByTyre, setTreadByTyre] = useState(() => { const m = {}; fitmentSchema("4-Wheeler (Passenger Car/Van/SUV)", 4).labels.forEach(l => m[l] = ""); return m; });
 
   // Pricing & Taxes (fixed)
@@ -922,13 +1054,14 @@ function FranchiseeApp({ token, onLogout }) {
     setLivePerTyre(per); setLiveTotal(tot);
   }, [vehicleType, tyreWidth, aspectRatio, rimDiameter, tyreCount]);
 
-  // Validation helpers
+  // Validation helpers with dynamic caps
   const sizeErrors = (() => {
+    const limits = sizeLimitsForVehicle(vehicleType);
     const errs = {};
     const w = num(tyreWidth), a = num(aspectRatio), r = num(rimDiameter);
-    if (!(w >= SIZE_LIMITS.widthMin && w <= SIZE_LIMITS.widthMax)) errs.width = `Width must be ${SIZE_LIMITS.widthMin}–${SIZE_LIMITS.widthMax} mm`;
-    if (!(a >= SIZE_LIMITS.aspectMin && a <= SIZE_LIMITS.aspectMax)) errs.aspect = `Aspect must be ${SIZE_LIMITS.aspectMin}–${SIZE_LIMITS.aspectMax}%`;
-    if (!(r >= SIZE_LIMITS.rimMin && r <= SIZE_LIMITS.rimMax)) errs.rim = `Rim must be ${SIZE_LIMITS.rimMin}–${SIZE_LIMITS.rimMax} inches`;
+    if (!(w >= limits.widthMin && w <= limits.widthMax)) errs.width = `Width must be ${limits.widthMin}–${limits.widthMax} mm`;
+    if (!(a >= limits.aspectMin && a <= limits.aspectMax)) errs.aspect = `Aspect must be ${limits.aspectMin}–${limits.aspectMax}%`;
+    if (!(r >= limits.rimMin && r <= limits.rimMax)) errs.rim = `Rim must be ${limits.rimMin}–${limits.rimMax} inches`;
     return errs;
   })();
 
@@ -937,15 +1070,34 @@ function FranchiseeApp({ token, onLogout }) {
     const cfg = VEHICLE_CFG[v] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
     const nextTyres = cfg.defaultTyres; setTyreCount(nextTyres);
     const schema = fitmentSchema(v, nextTyres);
-    const nextFit = {}; schema.labels.forEach(l => nextFit[l] = false); setFit(nextFit);
+    const nextFit = {}; schema.labels.forEach(l => nextFit[l] = true); setFit(nextFit); // pre-check all
     const nextT = {}; schema.labels.forEach(l => nextT[l] = ""); setTreadByTyre(nextT);
   }
   function onTyreCountChange(n) {
     setTyreCount(n);
     const schema = fitmentSchema(vehicleType, n);
-    const nextFit = {}; schema.labels.forEach(l => nextFit[l] = false); setFit(nextFit);
+    const nextFit = {}; schema.labels.forEach(l => nextFit[l] = true); setFit(nextFit); // pre-check all
     const nextT = {}; schema.labels.forEach(l => nextT[l] = ""); setTreadByTyre(nextT);
   }
+
+  // Fitment helpers (UI)
+  const selectAllFitment = () => setFit(prev => {
+    const schema = fitmentSchema(vehicleType, tyreCount);
+    const next = {}; schema.labels.forEach(l => next[l] = true); return next;
+  });
+  const clearAllFitment = () => setFit(prev => {
+    const schema = fitmentSchema(vehicleType, tyreCount);
+    const next = {}; schema.labels.forEach(l => next[l] = false); return next;
+  });
+  const autoFromTreads = () => setFit(prev => {
+    const schema = fitmentSchema(vehicleType, tyreCount);
+    const next = {};
+    schema.labels.forEach(l => {
+      const v = num(treadByTyre[l], -1);
+      next[l] = v >= 0 && String(treadByTyre[l]).trim() !== "";
+    });
+    return next;
+  });
 
   async function saveInvoiceToServer(payload) {
     try {
@@ -970,8 +1122,9 @@ function FranchiseeApp({ token, onLogout }) {
     return "";
   }
 
-  // Main flow: click → ensure consent → review modal → save → PDF + share
+  // Main flow
   const handleCalculateAndReview = async () => {
+    // Size validation
     if (sizeErrors.width || sizeErrors.aspect || sizeErrors.rim) { alert("Please fix tyre size fields before continuing."); return; }
     if (!customerName || !vehicleNumber) { alert("Please fill Customer Name and Vehicle Number."); return; }
 
@@ -984,32 +1137,35 @@ function FranchiseeApp({ token, onLogout }) {
       if (v < minTd) { alert(`Installation blocked: Tread depth at "${label}" is below ${minTd} mm.`); return; }
     }
 
+    // Fitment required: at least one
+    const impliedCount = impliedInstalledCount(fit, vehicleType, tyreCount);
+    if (impliedCount === 0) {
+      alert("Select the tyres where sealant was installed (Fitment is required).");
+      return;
+    }
+
     // Capture consent/signature first if missing
     if (!signatureData) { setSigOpen(true); return; }
 
-    // Compute pricing from computed dosage (manual override happens in modal)
+    // Compute base pricing preview with selected Tyres (final may use implied count if mismatch + manual)
     const perTyre = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const tCount = parseInt(tyreCount || "0", 10); if (!tCount || tCount < 1) { alert("Please select number of tyres."); return; }
-    const total = perTyre * tCount;
 
-    const baseRaw = total * PRICE_PER_ML;
-    const maxDiscount = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
     const enteredDiscount = Math.max(0, Math.round(num(discountInr)));
-    const discountUsed = Math.min(enteredDiscount, maxDiscount);
     const installation = Math.max(0, Math.round(num(installationFeeInr)));
-    const amountBeforeTax = Math.max(0, baseRaw - discountUsed + installation);
-    let cgst=0, sgst=0, igst=0;
-    const mode = taxMode === "IGST" ? "IGST" : "CGST_SGST";
-    if (mode === "CGST_SGST") { cgst = (amountBeforeTax * GST_PERCENT)/200; sgst = (amountBeforeTax * GST_PERCENT)/200; }
-    else { igst = (amountBeforeTax * GST_PERCENT)/100; }
-    const gstTotal = cgst + sgst + igst;
-    const grand = amountBeforeTax + gstTotal;
+    const outlierLevel = computeOutlierLevel(perTyre, vehicleType);
 
-    // Fill confirmation data
     confirmRef.current = {
-      vehicleType, tyreCount, tyreWidth, aspectRatio, rimDiameter,
-      perTyreMl: perTyre, totalMl: total, baseRaw, discountUsed, installation,
-      mode, cgst, sgst, igst, amountBeforeTax, gstTotal, grand
+      vehicleType, tyreCount: tCount, impliedCount,
+      tyreWidth, aspectRatio, rimDiameter,
+      computedPerTyre: perTyre,
+      pricePerMl: PRICE_PER_ML,
+      discountCapPct: DISCOUNT_MAX_PCT,
+      enteredDiscount,
+      installation,
+      taxMode,
+      gstPercent: GST_PERCENT,
+      outlierLevelComputed: outlierLevel
     };
     setConfirmOpen(true);
   };
@@ -1018,18 +1174,31 @@ function FranchiseeApp({ token, onLogout }) {
     shareText,
     useManual,
     manualPerTyre,
-    outlier_level,
     override_reason,
     override_chart_version,
     override_note,
+    override_ack,
+    fitment_mismatch,
+    fitment_mismatch_reason,
+    fitment_mismatch_note,
+    fitment_mismatch_ack,
+    outlier_level,
     computed_per_tyre,
-    computed_total
+    implied_installed_count,
+    tyres_selected
   }) {
     setConfirmOpen(false);
 
-    const tCount = parseInt(tyreCount || "0", 10);
-    const perTyreUsed = useManual ? Number(manualPerTyre || 0) : Number(confirmRef.current.perTyreMl || 0);
-    const totalUsed   = perTyreUsed * tCount;
+    const tCountSelected = parseInt(tyreCount || "0", 10);
+    const impliedCount = implied_installed_count;
+    const mismatch = fitment_mismatch;
+
+    // Decide per-tyre used
+    const perTyreUsed = useManual ? Number(manualPerTyre || 0) : Number(computed_per_tyre || 0);
+
+    // Totals use implied count when mismatch (only allowed if manual override path used)
+    const countUsed = mismatch ? Number(impliedCount || 0) : Number(tCountSelected || 0);
+    const totalUsed   = perTyreUsed * countUsed;
 
     // Recompute totals with the used dosage
     const baseRaw = totalUsed * PRICE_PER_ML;
@@ -1044,25 +1213,31 @@ function FranchiseeApp({ token, onLogout }) {
     const gstTotal = cgst + sgst + igst;
     const grand = amountBeforeTax + gstTotal;
 
-    // Consent snapshot + AUDIT (fallback store for override & outlier details)
+    // Consent snapshot + AUDIT (override & mismatch details)
     const consentSnapshotBase =
       "Customer Consent to Proceed: Informed of process, pricing and GST; consents to installation and undertakes to pay upon completion.";
     const audit = {
       outlier_level,
       computed_per_tyre_ml: computed_per_tyre,
-      computed_total_ml: computed_total,
       override_used: !!useManual,
       override_per_tyre_ml: useManual ? perTyreUsed : null,
       override_total_ml: useManual ? totalUsed : null,
       override_reason: useManual ? override_reason : null,
       override_chart_version: useManual ? override_chart_version : null,
-      override_note: useManual ? override_note : null
+      override_note: useManual ? override_note : null,
+      override_ack: !!override_ack,
+      fitment_implied_count: impliedCount,
+      tyres_selected: tCountSelected,
+      fitment_mismatch: !!mismatch,
+      fitment_mismatch_reason: mismatch ? fitment_mismatch_reason : null,
+      fitment_mismatch_note: mismatch ? fitment_mismatch_note : null,
+      fitment_mismatch_ack: !!fitment_mismatch_ack
     };
     const consentSnapshot = `${consentSnapshotBase}\n[AUDIT] ${JSON.stringify(audit)}`;
     const consentSignedAt = (consentMeta && consentMeta.agreedAt) || new Date().toISOString();
 
-    const treadMinVal = Math.min(...Object.values(treadByTyre).map(v => num(v, 0)));
-    const fitmentText = textFromFitState(fit) || deriveFitmentFromTreads({ vehicle_type: vehicleType, tyre_count: tCount, tread_depths_json: treadByTyre }) || null;
+    // Build fitment text; ensure not empty
+    const fitmentTextStored = textFromFitState(fit) || deriveFitmentFromTreads({ vehicle_type: vehicleType, tyre_count: tCountSelected, tread_depths_json: treadByTyre }) || null;
 
     const payload = {
       // Customer & Vehicle
@@ -1075,14 +1250,14 @@ function FranchiseeApp({ token, onLogout }) {
 
       // Vehicle & Fitment
       vehicle_type: vehicleType,
-      tyre_count: tCount,
+      tyre_count: tCountSelected,
       tyre_width_mm: num(tyreWidth),
       aspect_ratio: num(aspectRatio),
       rim_diameter_in: num(rimDiameter),
-      fitment_locations: fitmentText,
+      fitment_locations: fitmentTextStored,
 
       // Treads
-      tread_depth_mm: treadMinVal,
+      tread_depth_mm: Math.min(...Object.values(treadByTyre).map(v => num(v, 0))),
       tread_depths_json: JSON.stringify(treadByTyre),
 
       // Dosage (USED — computed or manual)
@@ -1119,12 +1294,11 @@ function FranchiseeApp({ token, onLogout }) {
     if (saved?.id) {
       alert(`Invoice saved. ID: ${saved.id}`);
 
-      // Fetch full to print, then **safety-merge** local values if server misses them
+      // Fetch full to print, then safety-merge local values if server misses them
       let inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
       if (!inv) inv = {};
 
-      // Safety net merge for immediate PDF accuracy
       const ensure = (v, fallback) => {
         if (v === undefined || v === null || (typeof v === "number" && !isFinite(v))) return fallback;
         if (typeof v === "string" && v.trim() === "") return fallback;
@@ -1132,7 +1306,6 @@ function FranchiseeApp({ token, onLogout }) {
       };
       const printable = {
         ...inv,
-        // Critical pricing & tax
         price_per_ml: ensure(inv?.price_per_ml, PRICE_PER_ML),
         discount: ensure(inv?.discount, discountUsed),
         installation_fee: ensure(inv?.installation_fee, installation),
@@ -1145,19 +1318,16 @@ function FranchiseeApp({ token, onLogout }) {
         sgst_amount: ensure(inv?.sgst_amount, sgst),
         igst_amount: ensure(inv?.igst_amount, igst),
 
-        // Fitment & treads
-        fitment_locations: ensure(inv?.fitment_locations, fitmentText),
-        tread_depth_mm: ensure(inv?.tread_depth_mm, treadMinVal),
+        fitment_locations: ensure(inv?.fitment_locations, fitmentTextStored),
+        tread_depth_mm: ensure(inv?.tread_depth_mm, Math.min(...Object.values(treadByTyre).map(v => num(v, 0)))),
         tread_depths_json: ensure(inv?.tread_depths_json, treadByTyre),
 
-        // Signatures
         customer_signature: ensure(inv?.customer_signature, signatureData),
         consent_signed_at: ensure(inv?.consent_signed_at, consentSignedAt),
         signed_at: ensure(inv?.signed_at, consentSignedAt),
 
-        // Dosage, size, etc.
         dosage_ml: ensure(inv?.dosage_ml, totalUsed),
-        tyre_count: ensure(inv?.tyre_count, tCount),
+        tyre_count: ensure(inv?.tyre_count, tCountSelected),
         tyre_width_mm: ensure(inv?.tyre_width_mm, num(tyreWidth)),
         aspect_ratio: ensure(inv?.aspect_ratio, num(aspectRatio)),
         rim_diameter_in: ensure(inv?.rim_diameter_in, num(rimDiameter)),
@@ -1166,7 +1336,6 @@ function FranchiseeApp({ token, onLogout }) {
 
       generateInvoicePDF(printable, profile, printable.tax_mode || "CGST_SGST");
 
-      // quick share helpers (text only)
       const subject = encodeURIComponent(`MaxTT Invoice #${saved.id}`);
       const body = encodeURIComponent(shareText);
       const mailto = `mailto:?subject=${subject}&body=${body}`;
@@ -1174,7 +1343,6 @@ function FranchiseeApp({ token, onLogout }) {
       const share = window.confirm("Open Email/WhatsApp share text?\n\nPress OK for Email, Cancel for WhatsApp.");
       if (share) { window.location.href = mailto; } else { window.open(wa, "_blank"); }
 
-      // reset signature for next invoice
       setSignatureData(""); setConsentMeta(null);
     }
   }
@@ -1183,6 +1351,10 @@ function FranchiseeApp({ token, onLogout }) {
   const schema = fitmentSchema(vehicleType, tyreCount);
   const baseStyle = { fontFamily: '"Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif' };
   const hasSizeError = !!(sizeErrors.width || sizeErrors.aspect || sizeErrors.rim);
+  const impliedCountUI = impliedInstalledCount(fit, vehicleType, tyreCount);
+  const mismatchUI = impliedCountUI !== Number(tyreCount);
+
+  const limits = sizeLimitsForVehicle(vehicleType);
 
   return (
     <div style={{ maxWidth: 1220, margin: "20px auto", padding: 10, ...baseStyle }}>
@@ -1231,7 +1403,7 @@ function FranchiseeApp({ token, onLogout }) {
             </select>
           </div>
           <div>
-            <label style={{ marginRight: 8 }}>Number of Tyres</label>
+            <label style={{ marginRight: 8 }}>Tyres (installed today)</label>
             <select value={tyreCount} onChange={e => onTyreCountChange(e.target.value)}>
               {(VEHICLE_CFG[vehicleType]?.options || [4]).map(n => <option key={n} value={n}>{n}</option>)}
             </select>
@@ -1240,26 +1412,35 @@ function FranchiseeApp({ token, onLogout }) {
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 6 }}>
           <div>
-            <input placeholder="Tyre Width (mm)" value={tyreWidth} onChange={e => setTyreWidth(e.target.value.replace(/[^\d]/g,""))} />
+            <input placeholder={`Tyre Width (${limits.widthMin}–${limits.widthMax} mm)`} value={tyreWidth} onChange={e => setTyreWidth(e.target.value.replace(/[^\d]/g,""))} />
             {sizeErrors.width && <div style={{ color: "crimson", fontSize: 12 }}>{sizeErrors.width}</div>}
           </div>
           <div>
-            <input placeholder="Aspect Ratio (%)" value={aspectRatio} onChange={e => setAspectRatio(e.target.value.replace(/[^\d]/g,""))} />
+            <input placeholder={`Aspect Ratio (${limits.aspectMin}–${limits.aspectMax} %)`} value={aspectRatio} onChange={e => setAspectRatio(e.target.value.replace(/[^\d]/g,""))} />
             {sizeErrors.aspect && <div style={{ color: "crimson", fontSize: 12 }}>{sizeErrors.aspect}</div>}
           </div>
           <div>
-            <input placeholder="Rim Diameter (in)" value={rimDiameter} onChange={e => setRimDiameter(e.target.value.replace(/[^\d]/g,""))} />
+            <input placeholder={`Rim Diameter (${limits.rimMin}–${limits.rimMax} in)`} value={rimDiameter} onChange={e => setRimDiameter(e.target.value.replace(/[^\d]/g,""))} />
             {sizeErrors.rim && <div style={{ color: "crimson", fontSize: 12 }}>{sizeErrors.rim}</div>}
           </div>
         </div>
 
         <div style={{ marginBottom: 8, marginTop: 6 }}>
-          <div style={{ marginBottom: 6 }}><strong>Fitment Location:</strong></div>
+          <div style={{ marginBottom: 6 }}><strong>Fitment Location (required)</strong></div>
           {schema.labels.map(label => (
             <label key={label} style={{ marginRight: 12 }}>
               <input type="checkbox" checked={!!fit[label]} onChange={(e)=>setFit(prev=>({ ...prev, [label]: e.target.checked }))} /> {label}
             </label>
           ))}
+          <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button type="button" onClick={selectAllFitment}>Select All</button>
+            <button type="button" onClick={clearAllFitment}>Clear All</button>
+            <button type="button" onClick={autoFromTreads}>Auto-select from Treads</button>
+            <span style={{ marginLeft: 10, fontSize: 12, color: impliedCountUI===0 ? "crimson" : (mismatchUI ? "#a05a00" : "#555") }}>
+              Installed Tyres (from Fitment): <strong>{impliedCountUI}</strong>{mismatchUI ? " — does not match Tyres" : ""}
+            </span>
+          </div>
+          {impliedCountUI===0 && <div style={{ color: "crimson", fontSize: 12, marginTop: 4 }}>Select the tyres where sealant was installed (required).</div>}
         </div>
 
         {/* Per-tyre tread depths */}
@@ -1337,10 +1518,10 @@ function FranchiseeApp({ token, onLogout }) {
       ) : (
         <span style={{ marginRight: 12, color: "green" }}>Signature & consent ✓</span>
       )}
-      <button onClick={handleCalculateAndReview} disabled={hasSizeError}>
+      <button onClick={handleCalculateAndReview} disabled={hasSizeError || impliedCountUI===0}>
         Review → Confirm → Save (Auto PDF)
       </button>
-      {hasSizeError && <div style={{ color: "crimson", marginTop: 6 }}>Fix tyre size errors to continue.</div>}
+      {(hasSizeError || impliedCountUI===0) && <div style={{ color: "crimson", marginTop: 6 }}>{impliedCountUI===0 ? "Fitment is required." : "Fix tyre size errors to continue."}</div>}
 
       {/* Recent Invoices */}
       <RecentInvoices token={token} profile={profile} />
