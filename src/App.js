@@ -1,5 +1,5 @@
 // src/App.js — Consent → Review & Confirm (manual override), fitment-aware validation,
-// installed-tyres sync, IST time, refined PDF layout, one-page signatures, no watermark.
+// installed-tyres sync, IST time via Intl, refined PDF layout, one-page signatures, no watermark.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
@@ -83,32 +83,40 @@ function inrRs(n) {
   const withCommas = other.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + last3;
   return `Rs. ${withCommas}.${dec}`;
 }
-function parseDateFlexible(v) {
-  if (v instanceof Date) return v;
-  if (!v) return new Date();
-  const s = String(v);
-  const d = new Date(s);
-  if (!isNaN(d)) return d;
-  const s2 = s.includes("T") ? s : s.replace(" ", "T");
-  const addZ = /[zZ]|[+\-]\d{2}:\d{2}$/.test(s2) ? s2 : (s2 + "Z");
-  const d2 = new Date(addZ);
-  return isNaN(d2) ? new Date() : d2;
+
+// Robust date coercion
+function toDate(any) {
+  if (any == null) return new Date();
+  if (any instanceof Date) return any;
+  if (typeof any === "number") {
+    // if seconds epoch, scale up
+    return new Date(any < 1e12 ? any * 1000 : any);
+  }
+  if (typeof any === "string") {
+    const s = any.trim();
+    if (/^\d{10}$/.test(s)) return new Date(Number(s) * 1000);
+    if (/^\d{13}$/.test(s)) return new Date(Number(s));
+    const d = new Date(s);
+    if (!isNaN(d)) return d;
+  }
+  // final fallback
+  return new Date(any);
 }
-const pad2 = (x) => String(x).padStart(2, "0");
-/** Strong IST formatter (manual +330 min) */
+
+/** IST formatter using Intl (avoids double-shifts & weird inputs) */
 function formatIST(dateLike) {
-  const d = parseDateFlexible(dateLike);
-  const utcMs = Date.UTC(
-    d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
-    d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()
-  );
-  const istMs = utcMs + 330 * 60 * 1000; // +5:30
-  const t = new Date(istMs);
-  const DD = pad2(t.getUTCDate());
-  const MM = pad2(t.getUTCMonth() + 1);
-  const YYYY = t.getUTCFullYear();
-  const HH = pad2(t.getUTCHours());
-  const mm = pad2(t.getUTCMinutes());
+  const d = toDate(dateLike);
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+  const parts = fmt.formatToParts(d).reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+  const DD = parts.day, MM = parts.month, YYYY = parts.year, HH = parts.hour, mm = parts.minute;
   return `${DD}/${MM}/${YYYY}, ${HH}:${mm} IST`;
 }
 
@@ -142,13 +150,10 @@ const installedCountFromFit = (fit) => Object.values(fit).filter(Boolean).length
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
 
-  // HTV/OTR relaxed UI caps
-  const isHTV = vehicleType.startsWith("HTV");
   const w = num(widthMm);
   const a = num(aspectPct);
   const r = num(rimIn);
 
-  // Convert & compute
   const widthIn = w * 0.03937;
   const totalHeightIn = widthIn * (a / 100) * 2 + r;
   let dosage = widthIn * totalHeightIn * entry.k;
@@ -179,11 +184,30 @@ function stateAbbrFromProfile(profile) {
 function displayInvoiceCode(inv, profile) {
   const fr = (profile?.franchisee_id || "FR").replace(/\s+/g, "");
   const st = stateAbbrFromProfile(profile);
-  const dt = parseDateFlexible(inv?.created_at || Date.now());
+  const dt = toDate(inv?.created_at || Date.now());
   const mm = String(dt.getMonth()+1).padStart(2,"0");
   const yy = String(dt.getFullYear()).slice(-2);
   const seq = String(inv?.id || 1).padStart(4,"0");
   return `${fr}/${st}/${seq}/${mm}${yy}`;
+}
+
+// Compact label for PDF only
+function vehicleTypeForPDF(s) {
+  if (!s) return "";
+  return s.replace("4-Wheeler (Passenger Car/Van/SUV)", "4-Wheeler (Car/Van/SUV)");
+}
+
+// Robust treads parser: accepts stringified JSON or object
+function parseTreadsMaybe(v) {
+  if (!v) return {};
+  if (typeof v === "string") {
+    try {
+      const o = JSON.parse(v);
+      return (o && typeof o === "object") ? o : {};
+    } catch { return {}; }
+  }
+  if (typeof v === "object") return v;
+  return {};
 }
 
 /* =======================
@@ -209,13 +233,11 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 10, font
 }
 
 function installedCountFromInvoice(inv) {
-  // Prefer fitment_locations (text list), fall back to non-empty treads
   const fitTxt = (inv?.fitment_locations || "").split(",").map(s => s.trim()).filter(Boolean);
   if (fitTxt.length) return fitTxt.length;
-  try {
-    const map = inv?.tread_depths_json ? JSON.parse(inv.tread_depths_json) : {};
-    return Object.values(map).filter(v => v !== "" && v != null).length || (num(inv.tyre_count) || 0);
-  } catch { return num(inv.tyre_count) || 0; }
+  const map = parseTreadsMaybe(inv?.tread_depths_json);
+  const count = Object.values(map).filter(v => v !== "" && v != null).length;
+  return count || (num(inv.tyre_count) || 0);
 }
 
 function generateInvoicePDF(inv, profile, taxMode) {
@@ -236,7 +258,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   let y = 56 + addrLines.length*12 + 2;
   doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, y); y += 12;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, M, y);
-  const created = parseDateFlexible(inv.created_at || Date.now());
+  const created = toDate(inv.created_at || Date.now());
   doc.text(`Invoice No: ${displayInvoiceCode(inv, profile)}`, W - M, 40, { align: "right" });
   doc.text(`Date: ${formatIST(created)}`, W - M, 56, { align: "right" });
 
@@ -267,20 +289,20 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.setFontSize(10.5);
 
   // Parse treads + fitment
-  let treadMap = {};
-  try { treadMap = inv.tread_depths_json ? JSON.parse(inv.tread_depths_json) : {}; } catch {}
+  const treadMapRaw = parseTreadsMaybe(inv.tread_depths_json);
+  const treadMap = treadMapRaw && typeof treadMapRaw === "object" ? treadMapRaw : {};
   const fitTxt = (inv.fitment_locations || "").split(",").map(s=>s.trim()).filter(Boolean);
   const installed = fitTxt.length || Object.values(treadMap).filter(v => v !== "" && v != null).length || num(inv.tyre_count);
 
   const rightKV = [
-    ["Category", inv.vehicle_type || ""],
+    ["Category", vehicleTypeForPDF(inv.vehicle_type || "")],
     ["Tyres", `${inv.tyre_count ?? ""}`],
     ["Installed Tyres", `${installed}`],
     ["Tyre Size", `${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`],
   ];
 
   // Print key-value in aligned columns
-  const labelW = 108;
+  const labelW = 120;
   rightKV.forEach((pair,i) => {
     const [k, v] = pair;
     const yy = yR + 16 + i*14;
@@ -291,14 +313,18 @@ function generateInvoicePDF(inv, profile, taxMode) {
   // Fitment & Treads table (only installed rows)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
-  const ftY = yR + 16 + rightKV.length*14 + 10;
+  const ftY = yR + 16 + rightKV.length*14 + 8;
   let yAfter = ftY;
 
   if (showRows.length) {
     try { doc.setFont(undefined,"bold"); } catch {}
     doc.text("Fitment & Tread Depth (mm)", xR, ftY);
     try { doc.setFont(undefined,"normal"); } catch {}
-    const body = showRows.map(lbl => [lbl.replace(" ×", " x"), `${treadMap[lbl] ?? ""}`]);
+    const body = showRows.map(lbl => {
+      const key = lbl;
+      const val = (treadMap[key] ?? inv.tread_depth_mm ?? "");
+      return [key.replace(" ×", " x"), String(val)];
+    });
     doc.autoTable({
       startY: ftY + 6,
       head: [["Position","Tread (mm)"]],
@@ -379,9 +405,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, 10, 9.5);
 
-  // No separator above signatures (as requested)
-
-  /* Zone 6 — Signature boxes, fixed from bottom; slightly shorter & lower */
+  /* Zone 6 — Signature boxes, fixed from bottom; slightly shorter & lower; no separator above */
   const boxWidth = 260, boxHeight = 58;
   const bottomGap = 60;
   const boxY = H - bottomGap - boxHeight;
