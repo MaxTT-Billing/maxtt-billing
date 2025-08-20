@@ -262,7 +262,7 @@ function installedCountFromInvoice(inv) {
 }
 
 /* =======================
-   PDF Generator (updated: signature push-down + smaller labels)
+   PDF Generator (updated: remove separator above signatures + add 2-line extra gap)
    ======================= */
 function generateInvoicePDF(inv, profile, taxMode) {
   const audit = parseAuditFromSnapshot(inv);
@@ -273,7 +273,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   // Signature box geometry (tuned)
   let boxWidth = 260, boxHeight = 58;
-  let bottomGap = 30; // was 60 → push boxes ~3 rows lower
+  let bottomGap = 30; // push boxes lower
   const baseLineH = 10;
 
   doc.setFont("helvetica","normal");
@@ -457,13 +457,13 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, secLineH, secFont);
 
-  // In tight mode, keep saving space by omitting the separator above signatures
-  if (!tightMode) drawSeparator(doc, yAfter3 + 6, W, M);
+  // *** CHANGE #1: Removed the separator above signatures to reclaim space ***
+  // (Previously: if (!tightMode) drawSeparator(doc, yAfter3 + 6, W, M);)
 
   /* Zone 6 — Signature boxes (pushed down + smaller labels) */
 
-  // Ensure at least 3 text rows gap above the boxes
-  const minGapAboveBoxes = 3 * secLineH;
+  // *** CHANGE #2: Ensure at least 5 text rows gap above the boxes (was 3 rows) ***
+  const minGapAboveBoxes = 5 * secLineH;
   const labelPad = 12; // smaller label baseline (was 14)
 
   // If still ultra-tight after compressing, shave box height a hair
@@ -1112,9 +1112,9 @@ function FranchiseeApp({ token, onLogout }) {
       // Pricing & Tax (USED)
       price_per_ml: PRICE_PER_ML,
       discount: discountUsed,              // primary
-      discount_inr: discountUsed,          // alt (for backend variants)
+      discount_inr: discountUsed,          // alt
       installation_fee: installation,      // primary
-      installation: installation,          // alt (for backend variants)
+      installation: installation,          // alt
       tax_mode: mode,
       gst_percentage: GST_PERCENT,
       total_before_gst: amountBeforeTax,
