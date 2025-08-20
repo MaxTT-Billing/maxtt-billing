@@ -84,26 +84,31 @@ function inrRs(n) {
   return `Rs. ${withCommas}.${dec}`;
 }
 
-// Robust date coercion
+// Robust date coercion (handles epoch, ISO, and "YYYY-MM-DD HH:mm:ss" as local)
 function toDate(any) {
   if (any == null) return new Date();
   if (any instanceof Date) return any;
   if (typeof any === "number") {
-    // if seconds epoch, scale up
     return new Date(any < 1e12 ? any * 1000 : any);
   }
   if (typeof any === "string") {
     const s = any.trim();
     if (/^\d{10}$/.test(s)) return new Date(Number(s) * 1000);
     if (/^\d{13}$/.test(s)) return new Date(Number(s));
+    // Plain datetime without TZ → parse as local time to avoid double-shift
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?$/);
+    if (m) {
+      const [,Y,Mo,D,H,Mi,S,Ms] = m;
+      const ms = Ms ? Number(Ms.slice(1).padEnd(3,'0').slice(0,3)) : 0;
+      return new Date(Number(Y), Number(Mo)-1, Number(D), Number(H), Number(Mi), Number(S), ms);
+    }
     const d = new Date(s);
     if (!isNaN(d)) return d;
   }
-  // final fallback
   return new Date(any);
 }
 
-/** IST formatter using Intl (avoids double-shifts & weird inputs) */
+/** IST formatter using Intl */
 function formatIST(dateLike) {
   const d = toDate(dateLike);
   const fmt = new Intl.DateTimeFormat("en-GB", {
@@ -184,7 +189,8 @@ function stateAbbrFromProfile(profile) {
 function displayInvoiceCode(inv, profile) {
   const fr = (profile?.franchisee_id || "FR").replace(/\s+/g, "");
   const st = stateAbbrFromProfile(profile);
-  const dt = toDate(inv?.created_at || Date.now());
+  const dtSrc = inv?.created_at_client || inv?.created_at || Date.now();
+  const dt = toDate(dtSrc);
   const mm = String(dt.getMonth()+1).padStart(2,"0");
   const yy = String(dt.getFullYear()).slice(-2);
   const seq = String(inv?.id || 1).padStart(4,"0");
@@ -258,9 +264,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   let y = 56 + addrLines.length*12 + 2;
   doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, y); y += 12;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, M, y);
-  const created = toDate(inv.created_at || Date.now());
+  const createdSrc = inv.created_at_client || inv.created_at || Date.now();
   doc.text(`Invoice No: ${displayInvoiceCode(inv, profile)}`, W - M, 40, { align: "right" });
-  doc.text(`Date: ${formatIST(created)}`, W - M, 56, { align: "right" });
+  doc.text(`Date: ${formatIST(createdSrc)}`, W - M, 56, { align: "right" });
 
   drawSeparator(doc, 86, W, M);
   y = 98;
@@ -350,9 +356,11 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   /* Zone 3 — Amounts table (recompute to be safe) */
   const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
+  const discountField = inv.discount ?? inv.discount_inr ?? 0;
+  const installField  = inv.installation_fee ?? inv.installation ?? 0;
   const maxDisc = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
-  const discountUsed = Math.min(Number(inv.discount || 0), maxDisc);
-  const install = Number(inv.installation_fee || 0);
+  const discountUsed = Math.min(Number(discountField || 0), maxDisc);
+  const install = Number(installField || 0);
   const base = Math.max(0, baseRaw - discountUsed + install);
   let cgst=0, sgst=0, igst=0;
   const mode = (taxMode || inv.tax_mode) === "IGST" ? "IGST" : "CGST_SGST";
@@ -360,6 +368,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
   else { igst = (base * GST_PERCENT)/100; }
   const gstTotal = cgst + sgst + igst;
   const grand = base + gstTotal;
+
+  // Align Value column with Vehicle Details column
+  const descWidth = (W/2 + 8) - M;          // left margin → xR
+  const valueWidth = W - M - (W/2 + 8);     // xR → right margin
 
   doc.autoTable({
     startY: z3Start,
@@ -380,7 +392,12 @@ function generateInvoicePDF(inv, profile, taxMode) {
     ],
     styles: { fontSize: 10, cellPadding: 5 },
     headStyles: { fillColor: [60,60,60] },
-    margin: { left: M, right: M }
+    margin: { left: M, right: M },
+    tableWidth: W - 2*M,
+    columnStyles: {
+      0: { cellWidth: descWidth },
+      1: { cellWidth: valueWidth }
+    }
   });
 
   let yZ3End = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : z3Start + 140;
@@ -397,15 +414,15 @@ function generateInvoicePDF(inv, profile, taxMode) {
   yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, 10, 9.5);
   drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += 16;
 
-  /* Zone 5 — Terms & Conditions */
+  /* Zone 5 — Terms & Conditions (+ Jurisdiction: Gurgaon) */
   const termsItems = [
     "The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
     "Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
-    "By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions."
+    "By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions. Jurisdiction: Gurgaon."
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, 10, 9.5);
 
-  /* Zone 6 — Signature boxes, fixed from bottom; slightly shorter & lower; no separator above */
+  /* Zone 6 — Signature boxes, fixed from bottom */
   const boxWidth = 260, boxHeight = 58;
   const bottomGap = 60;
   const boxY = H - bottomGap - boxHeight;
@@ -748,10 +765,11 @@ function RecentInvoices({ token, profile }) {
             <tbody>
               {rows.map(r => {
                 const inst = countInstalledFromText(r.fitment_locations);
+                const createdSrc = r.created_at_client || r.created_at;
                 return (
                   <tr key={r.id}>
                     <td>{r.id}</td>
-                    <td>{formatIST(r.created_at)}</td>
+                    <td>{formatIST(createdSrc)}</td>
                     <td>{r.customer_name ?? ""}</td>
                     <td>{r.vehicle_number ?? ""}</td>
                     <td>{r.vehicle_type ?? ""}</td>
@@ -991,6 +1009,8 @@ function FranchiseeApp({ token, onLogout }) {
     const consentSnapshot = `${consentSnapshotBase}\n[AUDIT] ${JSON.stringify(audit)}`;
     const consentSignedAt = (consentMeta && consentMeta.agreedAt) || new Date().toISOString();
 
+    const createdAtClient = new Date().toISOString();
+
     const saved = await saveInvoiceToServer({
       // Customer & Vehicle
       customer_name: customerName,
@@ -1012,7 +1032,7 @@ function FranchiseeApp({ token, onLogout }) {
       tread_depth_mm: Math.min(...Object.entries(treadByTyre).filter(([k])=>fit[k]).map(([,v]) => num(v, 0))),
       tread_depths_json: JSON.stringify(treadByTyre),
 
-      // Dosage (USED — computed or manual)
+      // Dosage (USED)
       dosage_ml: totalUsed,
 
       // GSTIN (optional)
@@ -1020,8 +1040,10 @@ function FranchiseeApp({ token, onLogout }) {
 
       // Pricing & Tax (USED)
       price_per_ml: PRICE_PER_ML,
-      discount: discountUsed,
-      installation_fee: installation,
+      discount: discountUsed,              // primary
+      discount_inr: discountUsed,          // alt (for backend variants)
+      installation_fee: installation,      // primary
+      installation: installation,          // alt (for backend variants)
       tax_mode: mode,
       gst_percentage: GST_PERCENT,
       total_before_gst: amountBeforeTax,
@@ -1030,6 +1052,9 @@ function FranchiseeApp({ token, onLogout }) {
       cgst_amount: cgst,
       sgst_amount: sgst,
       igst_amount: igst,
+
+      // Client timestamp for robust IST display later
+      created_at_client: createdAtClient,
 
       // Consent/signature
       consent_signature: signatureData,
