@@ -262,7 +262,8 @@ function installedCountFromInvoice(inv) {
 }
 
 /* =======================
-   PDF Generator (updated: remove separator above signatures + add 2-line extra gap)
+   PDF Generator
+   (this edit: +1 line gap between Z3 & Z4; move signatures up by 2 lines)
    ======================= */
 function generateInvoicePDF(inv, profile, taxMode) {
   const audit = parseAuditFromSnapshot(inv);
@@ -439,6 +440,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   drawSeparator(doc, yZ3End + 6, W, M);
   let yAfter3 = yZ3End + zoneGap + 6;
 
+  // ******** EDIT #1: Add ONE line gap between Zone 3 & Zone 4 ********
+  yAfter3 += secLineH;
+
   /* Zone 4 — Customer Declaration */
   const maxW = W - M*2;
   const declItems = [
@@ -457,14 +461,13 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, secLineH, secFont);
 
-  // *** CHANGE #1: Removed the separator above signatures to reclaim space ***
-  // (Previously: if (!tightMode) drawSeparator(doc, yAfter3 + 6, W, M);)
+  // (Separator above signatures remains removed to keep space)
 
-  /* Zone 6 — Signature boxes (pushed down + smaller labels) */
+  /* Zone 6 — Signature boxes (pushed down; labels small) */
 
-  // *** CHANGE #2: Ensure at least 5 text rows gap above the boxes (was 3 rows) ***
-  const minGapAboveBoxes = 5 * secLineH;
-  const labelPad = 12; // smaller label baseline (was 14)
+  // ******** EDIT #2: Move signatures UP by TWO lines (reduce gap: 5 → 3 lines) ********
+  const minGapAboveBoxes = 3 * secLineH; // was 5 * secLineH
+  const labelPad = 12; // smaller label baseline
 
   // If still ultra-tight after compressing, shave box height a hair
   if (yAfter3 > (H - bottomGap - boxHeight - 10)) {
@@ -486,7 +489,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   // Installer box
   doc.rect(M, finalBoxY, boxWidth, boxHeight);
-  doc.setFontSize(9); // smaller labels
+  doc.setFontSize(9);
   try { doc.setFont(undefined,"bold"); } catch {}
   doc.text("Installer Signature & Stamp", M + 10, finalBoxY + boxHeight + labelPad);
   try { doc.setFont(undefined,"normal"); } catch {}
