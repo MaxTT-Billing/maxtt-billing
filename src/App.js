@@ -1,5 +1,7 @@
-// src/App.js — Consent → Review & Confirm (manual override), fitment-aware validation,
-// installed-tyres sync, IST time via Intl, refined PDF layout, one-page signatures, no watermark.
+// src/App.js — IST snapshot + pricing snapshot + one-page adaptive layout
+// Consent → Review & Confirm (manual override), installed-tyre aware dosage,
+// robust IST time via Intl + client snapshot fallback, aligned right column,
+// signature-box no-overlap on one page, no watermark.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
@@ -34,7 +36,7 @@ const VEHICLE_CFG = {
   "3-Wheeler (Auto)":               { k: 2.2,  bufferPct: 0.03, defaultTyres: 3, options: [3] },
   "4-Wheeler (Passenger Car/Van/SUV)": { k: 2.56, bufferPct: 0.08, defaultTyres: 4, options: [4] },
   "6-Wheeler (Bus/LTV)":            { k: 3.0,  bufferPct: 0.05, defaultTyres: 6, options: [6] },
-  // HTV/OTR relaxed caps (Option B): larger sizes allowed in UI checks, pricing still uses same formula.
+  // HTV/OTR relaxed UI limits (Option B)
   "HTV (>6 wheels: Trucks/Trailers/Mining)": { k: 3.0, bufferPct: 0.05, defaultTyres: 8, options: [8,10,12,14,16,18] }
 };
 
@@ -154,11 +156,9 @@ const installedCountFromFit = (fit) => Object.values(fit).filter(Boolean).length
    ======================= */
 function computePerTyreDosageMl(vehicleType, widthMm, aspectPct, rimIn) {
   const entry = VEHICLE_CFG[vehicleType] || VEHICLE_CFG["4-Wheeler (Passenger Car/Van/SUV)"];
-
   const w = num(widthMm);
   const a = num(aspectPct);
   const r = num(rimIn);
-
   const widthIn = w * 0.03937;
   const totalHeightIn = widthIn * (a / 100) * 2 + r;
   let dosage = widthIn * totalHeightIn * entry.k;
@@ -203,7 +203,7 @@ function vehicleTypeForPDF(s) {
   return s.replace("4-Wheeler (Passenger Car/Van/SUV)", "4-Wheeler (Car/Van/SUV)");
 }
 
-// Robust treads parser: accepts stringified JSON or object
+// Robust treads parser
 function parseTreadsMaybe(v) {
   if (!v) return {};
   if (typeof v === "string") {
@@ -214,6 +214,17 @@ function parseTreadsMaybe(v) {
   }
   if (typeof v === "object") return v;
   return {};
+}
+
+// Parse [AUDIT] JSON from consent_snapshot
+function parseAuditFromSnapshot(inv) {
+  const snap = String(inv?.consent_snapshot || "");
+  const mark = snap.indexOf("[AUDIT]");
+  if (mark === -1) return null;
+  const brace = snap.indexOf("{", mark);
+  if (brace === -1) return null;
+  const jsonPart = snap.slice(brace).trim();
+  try { return JSON.parse(jsonPart); } catch { return null; }
 }
 
 /* =======================
@@ -237,6 +248,10 @@ function drawNumberedSection(doc, title, items, x, y, maxWidth, lineH = 10, font
   });
   return y;
 }
+function kv(doc, xLabel, xValue, y, label, value) {
+  doc.text(label + ":", xLabel, y);
+  doc.text(String(value), xValue, y);
+}
 
 function installedCountFromInvoice(inv) {
   const fitTxt = (inv?.fitment_locations || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -247,11 +262,16 @@ function installedCountFromInvoice(inv) {
 }
 
 function generateInvoicePDF(inv, profile, taxMode) {
+  const audit = parseAuditFromSnapshot(inv);
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const W = doc.internal.pageSize.getWidth();
   const H = doc.internal.pageSize.getHeight();
   const M = 36;
-  const zoneGap = 10;  // slightly tighter
+
+  // Signature box geometry
+  let boxWidth = 260, boxHeight = 58, bottomGap = 60;
+  const baseLineH = 10;
+
   doc.setFont("helvetica","normal");
 
   /* Zone 1 — Franchisee header */
@@ -265,8 +285,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, y); y += 12;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, M, y);
   const createdSrc = inv.created_at_client || inv.created_at || Date.now();
+  const createdDisplay = audit?.created_at_ist_str || formatIST(createdSrc);
   doc.text(`Invoice No: ${displayInvoiceCode(inv, profile)}`, W - M, 40, { align: "right" });
-  doc.text(`Date: ${formatIST(createdSrc)}`, W - M, 56, { align: "right" });
+  doc.text(`Date: ${createdDisplay}`, W - M, 56, { align: "right" });
 
   drawSeparator(doc, 86, W, M);
   y = 98;
@@ -294,7 +315,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
 
-  // Parse treads + fitment
+  const labelW = 120;
+  const xVal = xR + labelW;
+
   const treadMapRaw = parseTreadsMaybe(inv.tread_depths_json);
   const treadMap = treadMapRaw && typeof treadMapRaw === "object" ? treadMapRaw : {};
   const fitTxt = (inv.fitment_locations || "").split(",").map(s=>s.trim()).filter(Boolean);
@@ -306,20 +329,12 @@ function generateInvoicePDF(inv, profile, taxMode) {
     ["Installed Tyres", `${installed}`],
     ["Tyre Size", `${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`],
   ];
-
-  // Print key-value in aligned columns
-  const labelW = 120;
-  rightKV.forEach((pair,i) => {
-    const [k, v] = pair;
-    const yy = yR + 16 + i*14;
-    doc.text(`${k}:`, xR, yy);
-    doc.text(String(v), xR + labelW, yy);
-  });
+  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + 16 + i*14, pair[0], pair[1]));
 
   // Fitment & Treads table (only installed rows)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
-  const ftY = yR + 16 + rightKV.length*14 + 8;
+  const ftY = yR + 16 + rightKV.length*14 + 6;
   let yAfter = ftY;
 
   if (showRows.length) {
@@ -343,33 +358,52 @@ function generateInvoicePDF(inv, profile, taxMode) {
     yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : ftY + 30;
   }
 
-  // Dosage lines
+  // Dosage lines (aligned to right column value start)
   const perTyre = installed ? Math.round((Number(inv.dosage_ml||0)/installed)/25)*25 : null;
-  const d1 = `Per-tyre Dosage: ${perTyre ?? ""} ml`;
-  const d2 = `Total Dosage: ${inv.dosage_ml ?? ""} ml`;
-  doc.text(d1, xR, yAfter + 16);
-  doc.text(d2, xR, yAfter + 30);
+  kv(doc, xR, xVal, yAfter + 16, "Per-tyre Dosage", `${perTyre ?? ""} ml`);
+  kv(doc, xR, xVal, yAfter + 30, "Total Dosage", `${inv.dosage_ml ?? ""} ml`);
 
-  // Move Zone 3 start a bit higher overall
-  const z3Start = Math.max(y + 160, yAfter + 46);
+  // Zone 3 start
+  const z3StartBase = Math.max(y + 160, yAfter + 46);
+
+  // Signature boxes: compute geometry first to enable adaptive layout
+  const boxY = H - bottomGap - boxHeight;
+
+  // Estimate remaining space
+  const spaceLeft = boxY - (z3StartBase + 12);
+  // Tight mode when content likely tall (e.g., 4 treads) or low space remains
+  const tightMode = spaceLeft < 190 || showRows.length >= 4 || addrLines.length >= 3;
+
+  const zoneGap = tightMode ? 8 : 10;
+  const secLineH = tightMode ? 9 : baseLineH;
+  const secFont = tightMode ? 9.2 : 9.5;
+
+  const z3Start = z3StartBase;
   drawSeparator(doc, z3Start - 10, W, M);
 
-  /* Zone 3 — Amounts table (recompute to be safe) */
-  const baseRaw = Number(inv.dosage_ml || 0) * Number(inv.price_per_ml || PRICE_PER_ML);
-  const discountField = inv.discount ?? inv.discount_inr ?? 0;
-  const installField  = inv.installation_fee ?? inv.installation ?? 0;
+  /* Zone 3 — Amounts table (recompute with snapshot fallback) */
+  const pSnap = audit?.pricing_snapshot || null;
+  const pricePerMlUsed = Number(inv.price_per_ml || (pSnap && pSnap.price_per_ml) || PRICE_PER_ML);
+
+  let baseRaw = Number(inv.dosage_ml || 0) * pricePerMlUsed;
+  let discountField = inv.discount ?? inv.discount_inr;
+  let installField  = inv.installation_fee ?? inv.installation;
+
+  let discountUsed = Number(discountField != null ? discountField : (pSnap ? pSnap.discount_rupees : 0)) || 0;
+  let installUsed  = Number(installField  != null ? installField  : (pSnap ? pSnap.installation_rupees : 0)) || 0;
+
   const maxDisc = Math.round((baseRaw * DISCOUNT_MAX_PCT) / 100);
-  const discountUsed = Math.min(Number(discountField || 0), maxDisc);
-  const install = Number(installField || 0);
-  const base = Math.max(0, baseRaw - discountUsed + install);
-  let cgst=0, sgst=0, igst=0;
+  discountUsed = Math.min(discountUsed, maxDisc);
+
+  const base = Math.max(0, baseRaw - discountUsed + installUsed);
   const mode = (taxMode || inv.tax_mode) === "IGST" ? "IGST" : "CGST_SGST";
-  if (mode === "CGST_SGST") { cgst = (base * GST_PERCENT)/200; sgst = (base * GST_PERCENT)/200; }
-  else { igst = (base * GST_PERCENT)/100; }
+  const cgst = mode==="CGST_SGST" ? (base * GST_PERCENT)/200 : 0;
+  const sgst = mode==="CGST_SGST" ? (base * GST_PERCENT)/200 : 0;
+  const igst = mode==="IGST"       ? (base * GST_PERCENT)/100 : 0;
   const gstTotal = cgst + sgst + igst;
   const grand = base + gstTotal;
 
-  // Align Value column with Vehicle Details column
+  // Align Value column with Vehicle Details column (xVal)
   const descWidth = (W/2 + 8) - M;          // left margin → xR
   const valueWidth = W - M - (W/2 + 8);     // xR → right margin
 
@@ -378,10 +412,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
-      ["MRP per ml", inrRs(Number(inv.price_per_ml || PRICE_PER_ML))],
+      ["MRP per ml", inrRs(pricePerMlUsed)],
       ["Gross", inrRs(baseRaw)],
       ["Discount", `-${inrRs(discountUsed)}`],
-      ["Installation Charges", inrRs(install)],
+      ["Installation Charges", inrRs(installUsed)],
       ["Tax Mode", mode === "CGST_SGST" ? "CGST+SGST" : "IGST"],
       ["CGST (9%)", inrRs(cgst)],
       ["SGST (9%)", inrRs(sgst)],
@@ -402,17 +436,17 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   let yZ3End = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : z3Start + 140;
   drawSeparator(doc, yZ3End + 6, W, M);
-  let yAfter3 = yZ3End + 16;
+  let yAfter3 = yZ3End + zoneGap + 6;
 
-  /* Zone 4 — Customer Declaration */
+  /* Zone 4 — Customer Declaration (adaptive line height) */
   const maxW = W - M*2;
   const declItems = [
     "I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
     "I have read, understood, and accepted the Terms & Conditions stated herein.",
     "I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions."
   ];
-  yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, 10, 9.5);
-  drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += 16;
+  yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, secLineH, secFont);
+  drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += zoneGap + 6;
 
   /* Zone 5 — Terms & Conditions (+ Jurisdiction: Gurgaon) */
   const termsItems = [
@@ -420,33 +454,39 @@ function generateInvoicePDF(inv, profile, taxMode) {
     "Effectiveness is assured only when the vehicle is operated within the speed limits prescribed by the competent traffic/transport authorities (RTO/Transport Department) in India.",
     "By signing/accepting this invoice, the customer affirms that the installation has been carried out to their satisfaction and agrees to abide by these conditions. Jurisdiction: Gurgaon."
   ];
-  yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, 10, 9.5);
+  yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, secLineH, secFont);
+
+  // Tight-mode: avoid separator before signatures to save vertical room
+  if (!tightMode) drawSeparator(doc, yAfter3 + 6, W, M);
 
   /* Zone 6 — Signature boxes, fixed from bottom */
-  const boxWidth = 260, boxHeight = 58;
-  const bottomGap = 60;
-  const boxY = H - bottomGap - boxHeight;
+  // If still ultra-tight after compressing, slightly reduce box height for safety
+  if (yAfter3 > (H - bottomGap - boxHeight - 10)) {
+    boxHeight = 54;
+  }
+  const finalBoxY = H - bottomGap - boxHeight;
 
   // Installer
-  doc.rect(M, boxY, boxWidth, boxHeight);
+  doc.rect(M, finalBoxY, boxWidth, boxHeight);
   doc.setFontSize(10);
   try { doc.setFont(undefined,"bold"); } catch {}
-  doc.text("Installer Signature & Stamp", M + 10, boxY + boxHeight + 14);
+  doc.text("Installer Signature & Stamp", M + 10, finalBoxY + boxHeight + 14);
   try { doc.setFont(undefined,"normal"); } catch {}
 
   // Customer with captured signature inside the box
   const rightX = W - M - boxWidth;
-  doc.rect(rightX, boxY, boxWidth, boxHeight);
+  doc.rect(rightX, finalBoxY, boxWidth, boxHeight);
   try { doc.setFont(undefined,"bold"); } catch {}
-  doc.text("Customer Accepted & Confirmed", rightX + 10, boxY + boxHeight + 14);
+  doc.text("Customer Accepted & Confirmed", rightX + 10, finalBoxY + boxHeight + 14);
   try { doc.setFont(undefined,"normal"); } catch {}
 
   if (inv.customer_signature) {
-    try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, boxY + 8, 140, 40); } catch {}
+    try { doc.addImage(inv.customer_signature, "PNG", rightX + 10, finalBoxY + 8, 140, boxHeight - 18); } catch {}
   }
-  if (inv.signed_at) {
+  const signedDisplay = audit?.signed_at_ist_str || (inv.signed_at ? formatIST(inv.signed_at) : null);
+  if (signedDisplay) {
     doc.setFontSize(9.5);
-    doc.text(`Signed at: ${formatIST(inv.signed_at)}`, rightX + 10, boxY + boxHeight - 6);
+    doc.text(`Signed at: ${signedDisplay}`, rightX + 10, finalBoxY + boxHeight - 6);
   }
 
   doc.save(`MaxTT_Invoice_${inv.id || "draft"}.pdf`);
@@ -702,7 +742,6 @@ function RecentInvoices({ token, profile }) {
   async function exportCsv() {
     try {
       const params = new URLSearchParams(); if (q) params.set("q", q); if (from) params.set("from", from); if (to) params.set("to", to);
-      // NOTE: backend fix pending (route conflict). This will 500 until backend exposes /api/invoices/export.
       const res = await fetch(`${API_URL}/api/invoices/export?${params.toString()}`);
       if (!res.ok) throw new Error(`Export failed (${res.status})`);
       const blob = await res.blob(); const a = document.createElement("a"); const url = URL.createObjectURL(blob);
@@ -719,8 +758,6 @@ function RecentInvoices({ token, profile }) {
       generateInvoicePDF(inv, profile, inv.tax_mode || "CGST_SGST");
     } catch { alert("Could not fetch invoice for PDF"); }
   }
-
-  const countInstalledFromText = (txt) => (txt || "").split(",").map(s => s.trim()).filter(Boolean).length;
 
   if (loading) return <div style={{ marginTop: 20 }}>Loading recent invoices…</div>;
   if (error)   return <div style={{ marginTop: 20, color: "crimson" }}>{error}</div>;
@@ -764,12 +801,14 @@ function RecentInvoices({ token, profile }) {
             </thead>
             <tbody>
               {rows.map(r => {
-                const inst = countInstalledFromText(r.fitment_locations);
+                const inst = (r.fitment_locations || "").split(",").map(s => s.trim()).filter(Boolean).length;
                 const createdSrc = r.created_at_client || r.created_at;
+                const audit = parseAuditFromSnapshot(r);
+                const when = audit?.created_at_ist_str || formatIST(createdSrc);
                 return (
                   <tr key={r.id}>
                     <td>{r.id}</td>
-                    <td>{formatIST(createdSrc)}</td>
+                    <td>{when}</td>
                     <td>{r.customer_name ?? ""}</td>
                     <td>{r.vehicle_number ?? ""}</td>
                     <td>{r.vehicle_type ?? ""}</td>
@@ -840,7 +879,7 @@ function FranchiseeApp({ token, onLogout }) {
       .then(setProfile).catch(()=>setProfile(null));
   }, [token]);
 
-  // Recompute preview dosage
+  // Recompute preview dosage (installed count)
   useEffect(() => {
     const per = computePerTyreDosageMl(vehicleType, tyreWidth, aspectRatio, rimDiameter);
     const inst = installedCountFromFit(fit);
@@ -990,9 +1029,14 @@ function FranchiseeApp({ token, onLogout }) {
     const gstTotal = cgst + sgst + igst;
     const grand = amountBeforeTax + gstTotal;
 
-    // Consent snapshot + AUDIT
+    // Consent snapshot + AUDIT (also carry IST display strings + pricing snapshot)
     const consentSnapshotBase =
       "Customer Consent to Proceed: Informed of process, pricing and GST; consents to installation and undertakes to pay upon completion.";
+    const now = new Date();
+    const createdIst = formatIST(now);
+    const consentSignedAt = (consentMeta && consentMeta.agreedAt) || now.toISOString();
+    const signedIst = formatIST(consentSignedAt);
+
     const audit = {
       outlier_level,
       computed_per_tyre_ml: computed_per_tyre,
@@ -1004,12 +1048,21 @@ function FranchiseeApp({ token, onLogout }) {
       override_chart_version: useManual ? override_chart_version : null,
       override_note: useManual ? override_note : null,
       tyre_count_selected: num(tyreCount),
-      tyre_count_installed: installed
+      tyre_count_installed: installed,
+      created_at_ist_str: createdIst,
+      signed_at_ist_str: signedIst,
+      pricing_snapshot: {
+        price_per_ml: PRICE_PER_ML,
+        discount_rupees: discountUsed,
+        installation_rupees: installation,
+        amount_before_gst: amountBeforeTax,
+        gst_total: gstTotal,
+        total_with_gst: grand
+      }
     };
     const consentSnapshot = `${consentSnapshotBase}\n[AUDIT] ${JSON.stringify(audit)}`;
-    const consentSignedAt = (consentMeta && consentMeta.agreedAt) || new Date().toISOString();
 
-    const createdAtClient = new Date().toISOString();
+    const createdAtClient = now.toISOString();
 
     const saved = await saveInvoiceToServer({
       // Customer & Vehicle
@@ -1028,8 +1081,8 @@ function FranchiseeApp({ token, onLogout }) {
       rim_diameter_in: num(rimDiameter),
       fitment_locations: textFromFitState(fit) || null,
 
-      // Treads
-      tread_depth_mm: Math.min(...Object.entries(treadByTyre).filter(([k])=>fit[k]).map(([,v]) => num(v, 0))),
+      // Treads (min of installed positions)
+      tread_depth_mm: Math.min(...Object.entries(treadByTyre).filter(([k])=>fit[k]).map(([,v]) => num(v, 9999))),
       tread_depths_json: JSON.stringify(treadByTyre),
 
       // Dosage (USED)
@@ -1053,10 +1106,10 @@ function FranchiseeApp({ token, onLogout }) {
       sgst_amount: sgst,
       igst_amount: igst,
 
-      // Client timestamp for robust IST display later
+      // Client timestamps for robust IST display later
       created_at_client: createdAtClient,
 
-      // Consent/signature
+      // Consent/signature + snapshot incl. IST strings & pricing snapshot
       consent_signature: signatureData,
       consent_signed_at: consentSignedAt,
       consent_snapshot: consentSnapshot,
