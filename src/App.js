@@ -261,6 +261,9 @@ function installedCountFromInvoice(inv) {
   return count || (num(inv.tyre_count) || 0);
 }
 
+/* =======================
+   PDF Generator (updated: signature push-down + smaller labels)
+   ======================= */
 function generateInvoicePDF(inv, profile, taxMode) {
   const audit = parseAuditFromSnapshot(inv);
   const doc = new jsPDF({ unit: "pt", format: "a4" });
@@ -268,8 +271,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const H = doc.internal.pageSize.getHeight();
   const M = 36;
 
-  // Signature box geometry
-  let boxWidth = 260, boxHeight = 58, bottomGap = 60;
+  // Signature box geometry (tuned)
+  let boxWidth = 260, boxHeight = 58;
+  let bottomGap = 30; // was 60 → push boxes ~3 rows lower
   const baseLineH = 10;
 
   doc.setFont("helvetica","normal");
@@ -331,7 +335,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + 16 + i*14, pair[0], pair[1]));
 
-  // Fitment & Treads table (only installed rows)
+  // Fitment & Treads (installed only)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
   const ftY = yR + 16 + rightKV.length*14 + 6;
@@ -358,30 +362,27 @@ function generateInvoicePDF(inv, profile, taxMode) {
     yAfter = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : ftY + 30;
   }
 
-  // Dosage lines (aligned to right column value start)
+  // Dosage lines (aligned with right column values)
   const perTyre = installed ? Math.round((Number(inv.dosage_ml||0)/installed)/25)*25 : null;
   kv(doc, xR, xVal, yAfter + 16, "Per-tyre Dosage", `${perTyre ?? ""} ml`);
   kv(doc, xR, xVal, yAfter + 30, "Total Dosage", `${inv.dosage_ml ?? ""} ml`);
 
-  // Zone 3 start
+  // Zone 3 start (slightly above earlier to win space)
   const z3StartBase = Math.max(y + 160, yAfter + 46);
 
-  // Signature boxes: compute geometry first to enable adaptive layout
-  const boxY = H - bottomGap - boxHeight;
+  // Remain space estimate against bottom boxes
+  const boxYDefault = H - bottomGap - boxHeight;
+  const spaceLeft = boxYDefault - (z3StartBase + 12);
 
-  // Estimate remaining space
-  const spaceLeft = boxY - (z3StartBase + 12);
-  // Tight mode when content likely tall (e.g., 4 treads) or low space remains
+  // Tight mode detection
   const tightMode = spaceLeft < 190 || showRows.length >= 4 || addrLines.length >= 3;
-
   const zoneGap = tightMode ? 8 : 10;
   const secLineH = tightMode ? 9 : baseLineH;
   const secFont = tightMode ? 9.2 : 9.5;
 
-  const z3Start = z3StartBase;
-  drawSeparator(doc, z3Start - 10, W, M);
+  drawSeparator(doc, z3StartBase - 10, W, M);
 
-  /* Zone 3 — Amounts table (recompute with snapshot fallback) */
+  /* Zone 3 — Amounts table (with pricing snapshot fallback) */
   const pSnap = audit?.pricing_snapshot || null;
   const pricePerMlUsed = Number(inv.price_per_ml || (pSnap && pSnap.price_per_ml) || PRICE_PER_ML);
 
@@ -403,12 +404,12 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const gstTotal = cgst + sgst + igst;
   const grand = base + gstTotal;
 
-  // Align Value column with Vehicle Details column (xVal)
-  const descWidth = (W/2 + 8) - M;          // left margin → xR
-  const valueWidth = W - M - (W/2 + 8);     // xR → right margin
+  // Align columns with right column start
+  const descWidth = (W/2 + 8) - M;
+  const valueWidth = W - M - (W/2 + 8);
 
   doc.autoTable({
-    startY: z3Start,
+    startY: z3StartBase,
     head: [["Description", "Value"]],
     body: [
       ["Total Dosage (ml)", `${inv.dosage_ml ?? ""}`],
@@ -434,11 +435,11 @@ function generateInvoicePDF(inv, profile, taxMode) {
     }
   });
 
-  let yZ3End = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : z3Start + 140;
+  let yZ3End = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : z3StartBase + 140;
   drawSeparator(doc, yZ3End + 6, W, M);
   let yAfter3 = yZ3End + zoneGap + 6;
 
-  /* Zone 4 — Customer Declaration (adaptive line height) */
+  /* Zone 4 — Customer Declaration */
   const maxW = W - M*2;
   const declItems = [
     "I hereby acknowledge that the MaxTT Tyre Sealant installation has been completed on my vehicle to my satisfaction, as per my earlier consent to proceed.",
@@ -456,28 +457,45 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, secLineH, secFont);
 
-  // Tight-mode: avoid separator before signatures to save vertical room
+  // In tight mode, keep saving space by omitting the separator above signatures
   if (!tightMode) drawSeparator(doc, yAfter3 + 6, W, M);
 
-  /* Zone 6 — Signature boxes, fixed from bottom */
-  // If still ultra-tight after compressing, slightly reduce box height for safety
-  if (yAfter3 > (H - bottomGap - boxHeight - 10)) {
-    boxHeight = 54;
-  }
-  const finalBoxY = H - bottomGap - boxHeight;
+  /* Zone 6 — Signature boxes (pushed down + smaller labels) */
 
-  // Installer
+  // Ensure at least 3 text rows gap above the boxes
+  const minGapAboveBoxes = 3 * secLineH;
+  const labelPad = 12; // smaller label baseline (was 14)
+
+  // If still ultra-tight after compressing, shave box height a hair
+  if (yAfter3 > (H - bottomGap - boxHeight - 10)) {
+    boxHeight = 56;
+  }
+
+  // Compute final Y: respect bottom margin and min gap above
+  let finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + minGapAboveBoxes);
+
+  // Guard: keep labels within page bottom
+  if (finalBoxY + boxHeight + labelPad > H - 8) {
+    finalBoxY = H - 8 - (boxHeight + labelPad);
+    if (finalBoxY < yAfter3 + minGapAboveBoxes) {
+      // last resort: reduce box height a bit more
+      boxHeight = Math.max(54, boxHeight - 2);
+      finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + minGapAboveBoxes);
+    }
+  }
+
+  // Installer box
   doc.rect(M, finalBoxY, boxWidth, boxHeight);
-  doc.setFontSize(10);
+  doc.setFontSize(9); // smaller labels
   try { doc.setFont(undefined,"bold"); } catch {}
-  doc.text("Installer Signature & Stamp", M + 10, finalBoxY + boxHeight + 14);
+  doc.text("Installer Signature & Stamp", M + 10, finalBoxY + boxHeight + labelPad);
   try { doc.setFont(undefined,"normal"); } catch {}
 
-  // Customer with captured signature inside the box
+  // Customer box (with signature image)
   const rightX = W - M - boxWidth;
   doc.rect(rightX, finalBoxY, boxWidth, boxHeight);
   try { doc.setFont(undefined,"bold"); } catch {}
-  doc.text("Customer Accepted & Confirmed", rightX + 10, finalBoxY + boxHeight + 14);
+  doc.text("Customer Accepted & Confirmed", rightX + 10, finalBoxY + boxHeight + labelPad);
   try { doc.setFont(undefined,"normal"); } catch {}
 
   if (inv.customer_signature) {
@@ -485,7 +503,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   }
   const signedDisplay = audit?.signed_at_ist_str || (inv.signed_at ? formatIST(inv.signed_at) : null);
   if (signedDisplay) {
-    doc.setFontSize(9.5);
+    doc.setFontSize(9);
     doc.text(`Signed at: ${signedDisplay}`, rightX + 10, finalBoxY + boxHeight - 6);
   }
 
