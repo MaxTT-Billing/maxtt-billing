@@ -2,8 +2,6 @@
 // Consent → Review & Confirm (manual override), installed-tyre aware dosage,
 // robust IST time via Intl + client snapshot fallback, aligned right column,
 // signature-box no-overlap on one page, no watermark.
-// This edit: airy spacing (loose vs tight), odometer line always considered,
-// email + extra customer address line only in loose mode.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
@@ -87,12 +85,6 @@ function inrRs(n) {
   const withCommas = other.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + last3;
   return `Rs. ${withCommas}.${dec}`;
 }
-function fmtKm(v) {
-  if (v == null || v === "") return "";
-  const n = Number(v);
-  if (!Number.isFinite(n)) return String(v);
-  return n.toLocaleString("en-IN") + " km";
-}
 
 // Robust date coercion (handles epoch, ISO, and "YYYY-MM-DD HH:mm:ss" as local)
 function toDate(any) {
@@ -105,6 +97,7 @@ function toDate(any) {
     const s = any.trim();
     if (/^\d{10}$/.test(s)) return new Date(Number(s) * 1000);
     if (/^\d{13}$/.test(s)) return new Date(Number(s));
+    // Plain datetime without TZ → parse as local time to avoid double-shift
     const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?$/);
     if (m) {
       const [,Y,Mo,D,H,Mi,S,Ms] = m;
@@ -270,6 +263,7 @@ function installedCountFromInvoice(inv) {
 
 /* =======================
    PDF Generator
+   (this edit: +1 line gap between Z3 & Z4; move signatures up by 2 lines)
    ======================= */
 function generateInvoicePDF(inv, profile, taxMode) {
   const audit = parseAuditFromSnapshot(inv);
@@ -281,6 +275,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   // Signature box geometry (tuned)
   let boxWidth = 260, boxHeight = 58;
   let bottomGap = 30; // push boxes lower
+  const baseLineH = 10;
 
   doc.setFont("helvetica","normal");
 
@@ -302,46 +297,21 @@ function generateInvoicePDF(inv, profile, taxMode) {
   drawSeparator(doc, 86, W, M);
   y = 98;
 
-  /* Determine spacing mode (tight vs loose) based on remaining space */
-  const boxYDefault = H - bottomGap - boxHeight;
-  const estimatedZ3Top = y + 160; // baseline estimate used earlier
-  const spaceLeft = boxYDefault - (estimatedZ3Top + 12);
-  const tightMode = spaceLeft < 190 || addrLines.length >= 3;
-  const looseMode = !tightMode;
-
-  // Row gaps for Zone 2
-  const rowGapL = looseMode ? 16 : 14; // left (customer) lines
-  const rowGapR = looseMode ? 16 : 14; // right (vehicle) lines
-
-  // Paragraph line height for Zones 4–5
-  const secLineH = tightMode ? 10 : 10.5;
-  const secFont   = 9.5; // keep font same; only line height changes
-
   /* Zone 2 — Customer (left) & Vehicle (right) */
   // Left: Customer
   doc.setFontSize(12); try { doc.setFont(undefined,"bold"); } catch {}
   doc.text("Customer Details", M, y);
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
-
-  // Customer address split (loose mode allows an extra line)
-  const custAddress = String(inv.customer_address || "");
-  const custAddrParts = custAddress.split(/\n|,\s*/).filter(Boolean);
-  const addr1 = custAddrParts[0] || "";
-  const addr2 = (looseMode ? custAddrParts[1] : null) || "";
-
   const leftLines = [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
-    ...(inv.customer_email && looseMode ? [`Email: ${inv.customer_email}`] : []),
     `Vehicle: ${inv.vehicle_number || ""}`,
-    ...(inv.odometer != null && inv.odometer !== "" ? [`Odometer: ${fmtKm(inv.odometer)}`] : []),
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
-    `Address: ${addr1}`,
-    ...(addr2 ? [`Address 2: ${addr2}`] : []),
+    `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
   ];
-  leftLines.forEach((t,i)=>doc.text(t, M, y + 16 + i*rowGapL));
+  leftLines.forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
 
   // Right: Vehicle
   const xR = W/2 + 8; let yR = y;
@@ -364,12 +334,12 @@ function generateInvoicePDF(inv, profile, taxMode) {
     ["Installed Tyres", `${installed}`],
     ["Tyre Size", `${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`],
   ];
-  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + 16 + i*rowGapR, pair[0], pair[1]));
+  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + 16 + i*14, pair[0], pair[1]));
 
   // Fitment & Treads (installed only)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
-  const ftY = yR + 16 + rightKV.length*rowGapR + 6;
+  const ftY = yR + 16 + rightKV.length*14 + 6;
   let yAfter = ftY;
 
   if (showRows.length) {
@@ -398,8 +368,18 @@ function generateInvoicePDF(inv, profile, taxMode) {
   kv(doc, xR, xVal, yAfter + 16, "Per-tyre Dosage", `${perTyre ?? ""} ml`);
   kv(doc, xR, xVal, yAfter + 30, "Total Dosage", `${inv.dosage_ml ?? ""} ml`);
 
-  // Zone 3 start
+  // Zone 3 start (slightly above earlier to win space)
   const z3StartBase = Math.max(y + 160, yAfter + 46);
+
+  // Remain space estimate against bottom boxes
+  const boxYDefault = H - bottomGap - boxHeight;
+  const spaceLeft = boxYDefault - (z3StartBase + 12);
+
+  // Tight mode detection
+  const tightMode = spaceLeft < 190 || showRows.length >= 4 || addrLines.length >= 3;
+  const zoneGap = tightMode ? 8 : 10;
+  const secLineH = tightMode ? 9 : baseLineH;
+  const secFont = tightMode ? 9.2 : 9.5;
 
   drawSeparator(doc, z3StartBase - 10, W, M);
 
@@ -425,8 +405,10 @@ function generateInvoicePDF(inv, profile, taxMode) {
   const gstTotal = cgst + sgst + igst;
   const grand = base + gstTotal;
 
-  // Keep Zone 3 table aligned to page width (alignments unchanged),
-  // only adjust padding in loose mode.
+  // Align columns with right column start
+  const descWidth = (W/2 + 8) - M;
+  const valueWidth = W - M - (W/2 + 8);
+
   doc.autoTable({
     startY: z3StartBase,
     head: [["Description", "Value"]],
@@ -444,17 +426,21 @@ function generateInvoicePDF(inv, profile, taxMode) {
       ["GST Total", inrRs(gstTotal)],
       ["Total (with GST)", inrRs(grand)],
     ],
-    styles: { fontSize: 10, cellPadding: looseMode ? 6 : 5 },
+    styles: { fontSize: 10, cellPadding: 5 },
     headStyles: { fillColor: [60,60,60] },
     margin: { left: M, right: M },
-    tableWidth: W - 2*M
+    tableWidth: W - 2*M,
+    columnStyles: {
+      0: { cellWidth: descWidth },
+      1: { cellWidth: valueWidth }
+    }
   });
 
   let yZ3End = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY : z3StartBase + 140;
   drawSeparator(doc, yZ3End + 6, W, M);
-  let yAfter3 = yZ3End + 6 + (tightMode ? 8 : 10);
+  let yAfter3 = yZ3End + zoneGap + 6;
 
-  // Extra one-line gap between Zone 3 & 4 (as we set earlier)
+  // ******** EDIT #1: Add ONE line gap between Zone 3 & Zone 4 ********
   yAfter3 += secLineH;
 
   /* Zone 4 — Customer Declaration */
@@ -465,7 +451,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
     "I acknowledge that the total amount shown is correct and payable to the franchisee/installer of Treadstone Solutions."
   ];
   yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, secLineH, secFont);
-  drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += (tightMode ? 8 : 10) + 6;
+  drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += zoneGap + 6;
 
   /* Zone 5 — Terms & Conditions (+ Jurisdiction: Gurgaon) */
   const termsItems = [
@@ -475,17 +461,29 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, secLineH, secFont);
 
-  /* Zone 6 — Signature boxes (adaptive, no overlap) */
-  const labelPad = 12; // small labels
+  // (Separator above signatures remains removed to keep space)
+
+  /* Zone 6 — Signature boxes (pushed down; labels small) */
+
+  // ******** EDIT #2: Move signatures UP by TWO lines (reduce gap: 5 → 3 lines) ********
+  const minGapAboveBoxes = 3 * secLineH; // was 5 * secLineH
+  const labelPad = 12; // smaller label baseline
+
+  // If still ultra-tight after compressing, shave box height a hair
   if (yAfter3 > (H - bottomGap - boxHeight - 10)) {
     boxHeight = 56;
   }
-  let finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + 3 * secLineH);
+
+  // Compute final Y: respect bottom margin and min gap above
+  let finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + minGapAboveBoxes);
+
+  // Guard: keep labels within page bottom
   if (finalBoxY + boxHeight + labelPad > H - 8) {
     finalBoxY = H - 8 - (boxHeight + labelPad);
-    if (finalBoxY < yAfter3 + 3 * secLineH) {
+    if (finalBoxY < yAfter3 + minGapAboveBoxes) {
+      // last resort: reduce box height a bit more
       boxHeight = Math.max(54, boxHeight - 2);
-      finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + 3 * secLineH);
+      finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + minGapAboveBoxes);
     }
   }
 
@@ -871,7 +869,6 @@ function FranchiseeApp({ token, onLogout }) {
   // Customer & Vehicle
   const [customerName, setCustomerName] = useState("");
   const [customerAddress, setCustomerAddress] = useState("");
-  const [customerEmail, setCustomerEmail] = useState(""); // NEW (optional)
   const [mobileNumber, setMobileNumber] = useState("");
   const [vehicleNumber, setVehicleNumber] = useState("");
   const [odometer, setOdometer] = useState("");
@@ -1092,7 +1089,6 @@ function FranchiseeApp({ token, onLogout }) {
       // Customer & Vehicle
       customer_name: customerName,
       customer_address: customerAddress || null,
-      customer_email: customerEmail || null,     // NEW (optional)
       mobile_number: mobileNumber || null,
       vehicle_number: vehicleNumber,
       odometer: num(odometer),
@@ -1122,14 +1118,14 @@ function FranchiseeApp({ token, onLogout }) {
       discount_inr: discountUsed,          // alt
       installation_fee: installation,      // primary
       installation: installation,          // alt
-      tax_mode: taxMode === "IGST" ? "IGST" : "CGST_SGST",
+      tax_mode: mode,
       gst_percentage: GST_PERCENT,
       total_before_gst: amountBeforeTax,
       gst_amount: gstTotal,
       total_with_gst: grand,
-      cgst_amount: mode==="CGST_SGST" ? (amountBeforeTax * GST_PERCENT)/200 : 0,
-      sgst_amount: mode==="CGST_SGST" ? (amountBeforeTax * GST_PERCENT)/200 : 0,
-      igst_amount: mode==="IGST" ? (amountBeforeTax * GST_PERCENT)/100 : 0,
+      cgst_amount: cgst,
+      sgst_amount: sgst,
+      igst_amount: igst,
 
       // Client timestamps for robust IST display later
       created_at_client: createdAtClient,
@@ -1199,7 +1195,6 @@ function FranchiseeApp({ token, onLogout }) {
           <input placeholder="Vehicle Number" value={vehicleNumber} onChange={e => setVehicleNumber(e.target.value)} />
           <input placeholder="Odometer Reading" value={odometer} onChange={e => setOdometer(e.target.value)} />
           <input placeholder="Installer Name" value={installerName} onChange={e => setInstallerName(e.target.value)} />
-          <input placeholder="Customer Email (optional)" value={customerEmail} onChange={e => setCustomerEmail(e.target.value)} />
         </div>
       </div>
 
