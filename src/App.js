@@ -284,14 +284,6 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text(profile?.name || "Franchisee", M, 40);
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
-  // Odometer fallback: Support multiple onboarding keys
-  const odoVal = (function(){
-    const cand = [inv.odometer, inv.odometer_km, inv.customer_odometer,
-      (inv.customer && inv.customer.odometer_km), (inv.customer && inv.customer.odometer),
-      (inv.customer_profile && inv.customer_profile.odometer_km)];
-    for (var i=0;i<cand.length;i++){ var v=cand[i]; if (v!==undefined && v!==null && String(v).trim()!=="") return v; }
-    return "";
-  })();
   const addrLines = String(profile?.address || "Address not set").split(/\n|, /g).filter(Boolean);
   addrLines.slice(0,2).forEach((t,i) => doc.text(t, M, 56 + i*12));
   let y = 56 + Math.min(addrLines.length,2)*12 + 2;
@@ -311,11 +303,13 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text("Customer Details", M, y);
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
-  const leftLines = [
+    const odoVal = [inv.odometer, inv.customer_odometer, inv.odometer_km, inv.customer?.odometer_km, inv.customer?.odometer, inv.customer_profile?.odometer_km]
+    .find(v => v !== undefined && v !== null && String(v).trim() !== "");
+const leftLines = [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
     `Vehicle: ${inv.vehicle_number || ""}`,
-    `Odometer Reading: ${odoVal !== "" ? odoVal + " km" : ""}`,
+    `Odometer Reading: ${odoVal !== undefined ? odoVal + " km" : ""}`,
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
@@ -1172,7 +1166,15 @@ function FranchiseeApp({ token, onLogout }) {
       // Fetch full to print
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
-      if (inv) generateInvoicePDF(inv, profile, inv.tax_mode || "CGST_SGST");
+      if (inv) {
+        const merged = {
+          ...inv,
+          odometer: inv.odometer ?? (odometer !== "" ? Number(odometer) : null),
+          tread_depths_json: inv.tread_depths_json ?? JSON.stringify(treadByTyre),
+          fitment_locations: inv.fitment_locations ?? textFromFitState(fit)
+        };
+        generateInvoicePDF(merged, profile, merged.tax_mode || "CGST_SGST");
+      }
 
       // quick share helpers (text only)
       const subject = encodeURIComponent(`MaxTT Invoice #${saved.id}`);
