@@ -303,16 +303,18 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text("Customer Details", M, y);
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
+  const leftBudget = 14;
+  const odoVal = [inv.odometer, inv.customer_odometer, inv.odometer_km, inv.customer?.odometer_km, inv.customer?.odometer, inv.customer_profile?.odometer_km]
+    .find(v => v !== undefined && v !== null && (typeof v === "number" || String(v).trim() !== ""));
   const leftLines = [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
     `Vehicle: ${inv.vehicle_number || ""}`,
-    `Odometer Reading: ${inv.odometer != null && inv.odometer !== "" ? inv.odometer + " km" : ""}`,
+    `Odometer Reading: ${odoVal !== undefined ? odoVal + " km" : ""}`,
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
   ];
-  const leftBudget = 14;
   try {
     const addrRaw = String(inv.customer_address || "");
     const addrParts = addrRaw.split(/\n/g);
@@ -324,8 +326,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
       leftLines.push(`Email: ${inv.customer_email}`);
     }
   } catch {}
-
   leftLines.slice(0, leftBudget).forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
+  leftLines.forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
 
   // Right: Vehicle
   const xR = W/2 + 8; let yR = y;
@@ -354,7 +356,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   // Fitment & Treads (installed only)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
-  const ftY = yR + rightHeaderGap + rightKV.length*rightRowH + 3;
+  const ftY = yR + 13 + rightKV.length*12.5 + 3;
   let yAfter = ftY;
 
   if (showRows.length) {
@@ -384,7 +386,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   kv(doc, xR, xVal, yAfter + 30, "Total Dosage", `${inv.dosage_ml ?? ""} ml`);
 
   // Zone 3 start (slightly above earlier to win space)
-  const z3StartBase = Math.max(y + 160, yAfter + 46);
+  const leftBottomY = y + 16 + (Math.max(1, Math.min(leftLines.length, leftBudget)) - 1) * 14;
+  const rightBottomY = yAfter + 30;
+  const z3StartBase = Math.max(leftBottomY, rightBottomY) + baseLineH;
 
   // Remain space estimate against bottom boxes
   const boxYDefault = H - bottomGap - boxHeight;
@@ -468,7 +472,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, secLineH, secFont);
   drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += zoneGap + 6;
 
-  // Uniform 1-line gap between Zone 4 & Zone 5
+  // Uniform one-line gap between Zone 4 & Zone 5
   yAfter3 += secLineH;
 
   /* Zone 5 — Terms & Conditions (+ Jurisdiction: Gurgaon) */
@@ -479,12 +483,15 @@ function generateInvoicePDF(inv, profile, taxMode) {
   ];
   yAfter3 = drawNumberedSection(doc, "Terms & Conditions", termsItems, M, yAfter3, maxW, secLineH, secFont);
 
+  // Exactly one line gap after Zone 5 before signatures
+  yAfter3 += secLineH;
+
   // (Separator above signatures remains removed to keep space)
 
   /* Zone 6 — Signature boxes (pushed down; labels small) */
 
   // ******** EDIT #2: Move signatures UP by TWO lines (reduce gap: 5 → 3 lines) ********
-  const minGapAboveBoxes = 1 * secLineH; // was 5 * secLineH
+  const minGapAboveBoxes = 1 * secLineH; // uniform one-line gap
   const labelPad = 12; // smaller label baseline
 
   // If still ultra-tight after compressing, shave box height a hair
