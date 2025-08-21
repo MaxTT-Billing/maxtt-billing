@@ -303,31 +303,18 @@ function generateInvoicePDF(inv, profile, taxMode) {
   doc.text("Customer Details", M, y);
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
-    const odoVal = [inv.odometer, inv.customer_odometer, inv.odometer_km, inv.customer?.odometer_km, inv.customer?.odometer, inv.customer_profile?.odometer_km]
-    .find(v => v !== undefined && v !== null && String(v).trim() !== "");
-const leftLines = [
+  const invCode = displayInvoiceCode(inv, profile);
+  const leftLines = [
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
     `Vehicle: ${inv.vehicle_number || ""}`,
-    `Odometer Reading: ${odoVal !== undefined ? odoVal + " km" : ""}`,
+    `Odometer Reading: ${(inv.odometer ?? "") !== "" && (inv.odometer ?? null) != null ? inv.odometer + " km" : ""}`,
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
-    `Installer: ${inv.installer_name || ""}`
+    `Installer: ${inv.installer_name || ""}`,
+    `Referral Code: ${invCode}`
   ];
-  const leftBudget = 14;
-  try {
-    const addrRaw = String(inv.customer_address || "");
-    const addrParts = addrRaw.split(/\n/g);
-    if (addrParts.length > 1 && leftLines.length < leftBudget) {
-      const idx = leftLines.findIndex(l => l.startsWith("Address:"));
-      if (idx >= 0) leftLines.splice(idx+1, 0, `Address (contd): ${addrParts.slice(1).join(" ").trim()}`);
-    }
-    if (inv.customer_email && leftLines.length < leftBudget) {
-      leftLines.push(`Email: ${inv.customer_email}`);
-    }
-  } catch {}
-
-  leftLines.slice(0, leftBudget).forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
+  leftLines.forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
 
   // Right: Vehicle
   const xR = W/2 + 8; let yR = y;
@@ -350,13 +337,12 @@ const leftLines = [
     ["Installed Tyres", `${installed}`],
     ["Tyre Size", `${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`],
   ];
-  const rightRowH = 12.5; const rightHeaderGap = 13;
-  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + rightHeaderGap + i*rightRowH, pair[0], pair[1]));
+  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + 16 + i*14, pair[0], pair[1]));
 
   // Fitment & Treads (installed only)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
-  const ftY = yR + rightHeaderGap + rightKV.length*rightRowH + 3;
+  const ftY = yR + 16 + rightKV.length*14 + 6;
   let yAfter = ftY;
 
   if (showRows.length) {
@@ -369,7 +355,7 @@ const leftLines = [
       return [key.replace(" ×", " x"), String(val)];
     });
     doc.autoTable({
-      startY: ftY + 3,
+      startY: ftY + 6,
       head: [["Position","Tread (mm)"]],
       body,
       styles: { fontSize: 10, cellPadding: 4 },
@@ -470,9 +456,6 @@ const leftLines = [
   yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, secLineH, secFont);
   drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += zoneGap + 6;
 
-  // Uniform 1-line gap between Zone 4 & Zone 5
-  yAfter3 += secLineH;
-
   /* Zone 5 — Terms & Conditions (+ Jurisdiction: Gurgaon) */
   const termsItems = [
     "The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
@@ -486,7 +469,7 @@ const leftLines = [
   /* Zone 6 — Signature boxes (pushed down; labels small) */
 
   // ******** EDIT #2: Move signatures UP by TWO lines (reduce gap: 5 → 3 lines) ********
-  const minGapAboveBoxes = 1 * secLineH; // was 5 * secLineH
+  const minGapAboveBoxes = 3 * secLineH; // was 5 * secLineH
   const labelPad = 12; // smaller label baseline
 
   // If still ultra-tight after compressing, shave box height a hair
@@ -1167,13 +1150,14 @@ function FranchiseeApp({ token, onLogout }) {
       const inv = await fetch(`${API_URL}/api/invoices/${saved.id}`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json()).catch(() => null);
       if (inv) {
-        const merged = {
+        const selectedFit = Object.entries(fit).filter(([k,v])=>v).map(([k])=>k).join(", ");
+        const invMerged = {
           ...inv,
-          odometer: inv.odometer ?? (odometer !== "" ? Number(odometer) : null),
+          odometer: inv.odometer ?? num(odometer),
           tread_depths_json: inv.tread_depths_json ?? JSON.stringify(treadByTyre),
-          fitment_locations: inv.fitment_locations ?? textFromFitState(fit)
+          fitment_locations: inv.fitment_locations ?? selectedFit
         };
-        generateInvoicePDF(merged, profile, merged.tax_mode || "CGST_SGST");
+        generateInvoicePDF(invMerged, profile, inv.tax_mode || "CGST_SGST");
       }
 
       // quick share helpers (text only)
