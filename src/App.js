@@ -479,6 +479,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
 
   // Compute final Y: respect bottom margin and min gap above
   let finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + minGapAboveBoxes);
+  // Move signature band two rows up
+  finalBoxY = Math.max(finalBoxY - 2*baseLineH, yAfter3 + minGapAboveBoxes);
 
   // Guard: keep labels within page bottom
   if (finalBoxY + boxHeight + labelPad > H - 8) {
@@ -487,6 +489,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
       // last resort: reduce box height a bit more
       boxHeight = Math.max(54, boxHeight - 2);
       finalBoxY = Math.max(H - bottomGap - boxHeight, yAfter3 + minGapAboveBoxes);
+  // Move signature band two rows up
+  finalBoxY = Math.max(finalBoxY - 2*baseLineH, yAfter3 + minGapAboveBoxes);
     }
   }
 
