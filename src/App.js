@@ -285,8 +285,8 @@ function generateInvoicePDF(inv, profile, taxMode) {
   try { doc.setFont(undefined,"normal"); } catch {}
   doc.setFontSize(10.5);
   const addrLines = String(profile?.address || "Address not set").split(/\n|, /g).filter(Boolean);
-  addrLines.slice(0,3).forEach((t,i) => doc.text(t, M, 56 + i*12));
-  let y = 56 + addrLines.length*12 + 2;
+  addrLines.slice(0,2).forEach((t,i) => doc.text(t, M, 56 + i*12));
+  let y = 56 + Math.min(addrLines.length,2)*12 + 2;
   doc.text(`Franchisee ID: ${profile?.franchisee_id || ""}`, M, y); y += 12;
   doc.text(`GSTIN: ${profile?.gstin || ""}`, M, y);
   const createdSrc = inv.created_at_client || inv.created_at || Date.now();
@@ -307,11 +307,25 @@ function generateInvoicePDF(inv, profile, taxMode) {
     `Name: ${inv.customer_name || ""}`,
     `Mobile: ${inv.mobile_number || ""}`,
     `Vehicle: ${inv.vehicle_number || ""}`,
+    `Odometer Reading: ${inv.odometer != null && inv.odometer !== "" ? inv.odometer + " km" : ""}`,
     `Customer GSTIN: ${inv.customer_gstin || ""}`,
     `Address: ${inv.customer_address || ""}`,
     `Installer: ${inv.installer_name || ""}`
   ];
-  leftLines.forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
+  const leftBudget = 14;
+  try {
+    const addrRaw = String(inv.customer_address || "");
+    const addrParts = addrRaw.split(/\n/g);
+    if (addrParts.length > 1 && leftLines.length < leftBudget) {
+      const idx = leftLines.findIndex(l => l.startsWith("Address:"));
+      if (idx >= 0) leftLines.splice(idx+1, 0, `Address (contd): ${addrParts.slice(1).join(" ").trim()}`);
+    }
+    if (inv.customer_email && leftLines.length < leftBudget) {
+      leftLines.push(`Email: ${inv.customer_email}`);
+    }
+  } catch {}
+
+  leftLines.slice(0, leftBudget).forEach((t,i)=>doc.text(t, M, y + 16 + i*14));
 
   // Right: Vehicle
   const xR = W/2 + 8; let yR = y;
@@ -334,12 +348,13 @@ function generateInvoicePDF(inv, profile, taxMode) {
     ["Installed Tyres", `${installed}`],
     ["Tyre Size", `${inv.tyre_width_mm || ""}/${inv.aspect_ratio || ""} R${inv.rim_diameter_in || ""}`],
   ];
-  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + 16 + i*14, pair[0], pair[1]));
+  const rightRowH = 12.5; const rightHeaderGap = 13;
+  rightKV.forEach((pair,i) => kv(doc, xR, xVal, yR + rightHeaderGap + i*rightRowH, pair[0], pair[1]));
 
   // Fitment & Treads (installed only)
   const showRows = (fitTxt.length ? fitTxt : Object.keys(treadMap))
     .filter(k => (fitTxt.length ? true : (treadMap[k] !== "" && treadMap[k] != null)));
-  const ftY = yR + 16 + rightKV.length*14 + 6;
+  const ftY = yR + rightHeaderGap + rightKV.length*rightRowH + 3;
   let yAfter = ftY;
 
   if (showRows.length) {
@@ -352,7 +367,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
       return [key.replace(" ×", " x"), String(val)];
     });
     doc.autoTable({
-      startY: ftY + 6,
+      startY: ftY + 3,
       head: [["Position","Tread (mm)"]],
       body,
       styles: { fontSize: 10, cellPadding: 4 },
@@ -453,6 +468,9 @@ function generateInvoicePDF(inv, profile, taxMode) {
   yAfter3 = drawNumberedSection(doc, "Customer Declaration", declItems, M, yAfter3, maxW, secLineH, secFont);
   drawSeparator(doc, yAfter3 + 6, W, M); yAfter3 += zoneGap + 6;
 
+  // Uniform 1-line gap between Zone 4 & Zone 5
+  yAfter3 += secLineH;
+
   /* Zone 5 — Terms & Conditions (+ Jurisdiction: Gurgaon) */
   const termsItems = [
     "The MaxTT Tyre Sealant, developed in New Zealand and supplied by Treadstone Solutions, is a preventive safety solution designed to reduce tyre-related risks and virtually eliminate punctures and blowouts.",
@@ -466,7 +484,7 @@ function generateInvoicePDF(inv, profile, taxMode) {
   /* Zone 6 — Signature boxes (pushed down; labels small) */
 
   // ******** EDIT #2: Move signatures UP by TWO lines (reduce gap: 5 → 3 lines) ********
-  const minGapAboveBoxes = 3 * secLineH; // was 5 * secLineH
+  const minGapAboveBoxes = 1 * secLineH; // was 5 * secLineH
   const labelPad = 12; // smaller label baseline
 
   // If still ultra-tight after compressing, shave box height a hair
