@@ -1,133 +1,152 @@
 import React from "react";
 
-/**
- * InvoicePreview.jsx
- * Renders the invoice on-screen. Zone-2 (Customer Details) now includes:
- *  - Customer Code (Seal & Earn)
- *  - HSN Code
- *
- * Expects `invoice` prop with fields used below.
- */
 export default function InvoicePreview({ invoice }) {
   if (!invoice) return null;
 
-  // Safe getters
-  const customerCode = invoice.customer_code || "";
-  const hsnCode = invoice.hsn_code || "3403.19.00";
+  const val = (v, d = "—") => (v === 0 || v ? String(v) : d);
+
+  // Normalize keys + fallbacks
+  const id = invoice?.id ?? invoice?.ID ?? invoice?.invoice_id;
+  const computedCustomerCode = id ? `C${String(id).padStart(6, "0")}` : "";
+  const customerCode =
+    invoice?.customer_code ??
+    invoice?.customerCode ??
+    computedCustomerCode;
+
+  const hsnCode =
+    invoice?.hsn_code ??
+    invoice?.hsnCode ??
+    "3403.19.00";
+
+  const odo = invoice?.odometer ?? invoice?.odo ?? null;
+
+  // Per-tyre treads with legacy fallback
+  const treadLegacy = invoice?.tread_depth_mm ?? invoice?.treadDepthMm ?? null;
+  const treadFL = invoice?.tread_fl_mm ?? invoice?.treadFlMm ?? treadLegacy;
+  const treadFR = invoice?.tread_fr_mm ?? invoice?.treadFrMm ?? treadLegacy;
+  const treadRL = invoice?.tread_rl_mm ?? invoice?.treadRlMm ?? treadLegacy;
+  const treadRR = invoice?.tread_rr_mm ?? invoice?.treadRrMm ?? treadLegacy;
+
+  const totalBefore = Number(invoice?.total_before_gst ?? invoice?.totalBeforeGst ?? NaN);
+  const gstAmt = Number(invoice?.gst_amount ?? invoice?.gstAmount ?? NaN);
+  const gstRateRaw = invoice?.gst_rate ?? invoice?.gstRate;
+  const gstPct =
+    (gstRateRaw !== undefined && gstRateRaw !== null && String(gstRateRaw) !== "")
+      ? Number(gstRateRaw)
+      : (Number.isFinite(totalBefore) && totalBefore > 0 && Number.isFinite(gstAmt))
+          ? Number(((gstAmt / totalBefore) * 100).toFixed(2))
+          : null;
 
   return (
-    <div className="invoice-preview" style={{ fontFamily: "sans-serif", color: "#111" }}>
-      {/* Zone 1: Header */}
+    <div style={{ color: "#111" }}>
+      {/* Zone 1 */}
       <section style={{ marginBottom: 16, borderBottom: "1px solid #ddd", paddingBottom: 8 }}>
-        <h2 style={{ margin: 0 }}>MaxTT Tyre Sealant — Invoice</h2>
+        <h3 style={{ margin: 0 }}>MaxTT Tyre Sealant — Invoice</h3>
         <div style={{ fontSize: 12, marginTop: 4 }}>
-          <strong>Invoice #:</strong> {invoice.id ?? "—"} &nbsp;|&nbsp;
+          <strong>Invoice #:</strong> {val(id)} &nbsp;|&nbsp;
           <strong>Date:</strong>{" "}
-          {invoice.created_at ? new Date(invoice.created_at).toLocaleString() : "—"}
+          {invoice?.created_at ? new Date(invoice.created_at).toLocaleString() : "—"}
         </div>
       </section>
 
-      {/* Zone 2: Customer Details (with the 2 new rows) */}
+      {/* Zone 2 */}
       <section style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
+        <h4 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
           Customer Details
-        </h3>
+        </h4>
 
-        <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", rowGap: 6, columnGap: 12, fontSize: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", rowGap: 6, columnGap: 12, fontSize: 14 }}>
           <div><strong>Customer Name</strong></div>
-          <div>{invoice.customer_name || "—"}</div>
+          <div>{val(invoice?.customer_name ?? invoice?.customerName)}</div>
 
           <div><strong>Mobile</strong></div>
-          <div>{invoice.mobile_number || "—"}</div>
+          <div>{val(invoice?.mobile_number ?? invoice?.mobileNumber)}</div>
 
           <div><strong>Vehicle No.</strong></div>
-          <div>{invoice.vehicle_number || "—"}</div>
+          <div>{val(invoice?.vehicle_number ?? invoice?.vehicleNumber)}</div>
 
           <div><strong>Installer</strong></div>
-          <div>{invoice.installer_name || "—"}</div>
+          <div>{val(invoice?.installer_name ?? invoice?.installerName)}</div>
 
-          {/* NEW ROW 1 */}
+          {/* NEW rows */}
           <div><strong>Customer Code (Seal & Earn)</strong></div>
-          <div>{customerCode || "—"}</div>
+          <div>{val(customerCode)}</div>
 
-          {/* NEW ROW 2 */}
           <div><strong>HSN Code</strong></div>
-          <div>{hsnCode}</div>
+          <div>{val(hsnCode)}</div>
 
           <div><strong>Odometer</strong></div>
-          <div>{invoice.odometer ?? "—"}</div>
+          <div>{val(odo)}</div>
 
-          <div><strong>Tread Depth (mm)</strong></div>
-          <div>{invoice.tread_depth_mm ?? "—"}</div>
+          <div><strong>Tread Depth FL (mm)</strong></div>
+          <div>{val(treadFL)}</div>
+
+          <div><strong>Tread Depth FR (mm)</strong></div>
+          <div>{val(treadFR)}</div>
+
+          <div><strong>Tread Depth RL (mm)</strong></div>
+          <div>{val(treadRL)}</div>
+
+          <div><strong>Tread Depth RR (mm)</strong></div>
+          <div>{val(treadRR)}</div>
 
           <div><strong>Customer GSTIN</strong></div>
-          <div>{invoice.customer_gstin || "—"}</div>
+          <div>{val(invoice?.customer_gstin ?? invoice?.customerGstin)}</div>
 
           <div><strong>Customer Address</strong></div>
-          <div>{invoice.customer_address || "—"}</div>
+          <div>{val(invoice?.customer_address ?? invoice?.customerAddress)}</div>
         </div>
       </section>
 
-      {/* Zone 3: Tyre/Vehicle */}
+      {/* Zone 3 */}
       <section style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
+        <h4 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
           Vehicle & Tyre Details
-        </h3>
-        <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", rowGap: 6, columnGap: 12, fontSize: 14 }}>
+        </h4>
+        <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", rowGap: 6, columnGap: 12, fontSize: 14 }}>
           <div><strong>Vehicle Type</strong></div>
-          <div>{invoice.vehicle_type || "—"}</div>
+          <div>{val(invoice?.vehicle_type ?? invoice?.vehicleType)}</div>
 
           <div><strong>Tyre Width (mm)</strong></div>
-          <div>{invoice.tyre_width_mm ?? "—"}</div>
+          <div>{val(invoice?.tyre_width_mm ?? invoice?.tyreWidthMm)}</div>
 
           <div><strong>Aspect Ratio</strong></div>
-          <div>{invoice.aspect_ratio ?? "—"}</div>
+          <div>{val(invoice?.aspect_ratio ?? invoice?.aspectRatio)}</div>
 
           <div><strong>Rim Diameter (in)</strong></div>
-          <div>{invoice.rim_diameter_in ?? "—"}</div>
+          <div>{val(invoice?.rim_diameter_in ?? invoice?.rimDiameterIn)}</div>
 
           <div><strong>Tyre Count</strong></div>
-          <div>{invoice.tyre_count ?? "—"}</div>
+          <div>{val(invoice?.tyre_count ?? invoice?.tyreCount)}</div>
 
           <div><strong>Fitment Locations</strong></div>
-          <div>{invoice.fitment_locations || "—"}</div>
+          <div>{val(invoice?.fitment_locations ?? invoice?.fitmentLocations)}</div>
         </div>
       </section>
 
-      {/* Zone 4: Price/GST */}
+      {/* Zone 4 */}
       <section style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
+        <h4 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
           Billing
-        </h3>
-        <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", rowGap: 6, columnGap: 12, fontSize: 14 }}>
+        </h4>
+        <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", rowGap: 6, columnGap: 12, fontSize: 14 }}>
           <div><strong>Dosage (ml)</strong></div>
-          <div>{invoice.dosage_ml ?? "—"}</div>
+          <div>{val(invoice?.dosage_ml ?? invoice?.dosageMl)}</div>
 
           <div><strong>Price / ml</strong></div>
-          <div>{invoice.price_per_ml ?? "—"}</div>
+          <div>{val(invoice?.price_per_ml ?? invoice?.pricePerMl)}</div>
 
           <div><strong>Total before GST</strong></div>
-          <div>{invoice.total_before_gst ?? "—"}</div>
+          <div>{val(totalBefore)}</div>
 
           <div><strong>GST %</strong></div>
-          <div>{invoice.gst_rate ?? "—"}</div>
+          <div>{gstPct === null ? "—" : `${gstPct}`}</div>
 
           <div><strong>GST Amount</strong></div>
-          <div>{invoice.gst_amount ?? "—"}</div>
+          <div>{val(gstAmt)}</div>
 
           <div><strong>Total with GST</strong></div>
-          <div>{invoice.total_with_gst ?? "—"}</div>
-        </div>
-      </section>
-
-      {/* Zone 5: Signatures */}
-      <section>
-        <h3 style={{ margin: "0 0 8px 0", fontSize: 16, borderBottom: "1px solid #eee", paddingBottom: 6 }}>
-          Signatures
-        </h3>
-        <div style={{ fontSize: 12 }}>
-          <div><strong>Customer Signature:</strong> {invoice.customer_signature ? "Captured" : "—"}</div>
-          <div><strong>Signed At:</strong> {invoice.signed_at ? new Date(invoice.signed_at).toLocaleString() : "—"}</div>
+          <div>{val(invoice?.total_with_gst ?? invoice?.totalWithGst)}</div>
         </div>
       </section>
     </div>
